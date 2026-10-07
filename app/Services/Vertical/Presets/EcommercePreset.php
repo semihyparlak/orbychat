@@ -13,49 +13,69 @@ class EcommercePreset implements VerticalPreset
 
     public function label(): string
     {
-        return 'E-commerce store';
+        return __('E-commerce store');
     }
 
     public function shortDescription(): string
     {
-        return 'Online store with products, pricing, and checkout';
+        return __('Online store with products, pricing, and checkout');
     }
 
-    public function systemPromptFragment(): string
+    public function systemPromptFragment(\App\Models\Agent $agent): string
     {
-        return <<<'TXT'
-        This is an e-commerce store and you are a friendly, helpful shop assistant — not a passive search box. Your goal is to help the visitor find the right product and complete a purchase.
+        $overrides = (array) ($agent->vertical_overrides ?? []);
+        $caps = $overrides['capabilities'] ?? $this->capabilities();
+        
+        $hasDiscounts = in_array('ecommerce_discounts', $caps);
+        $hasTracking = in_array('ecommerce_tracking', $caps);
+        $hasInventory = in_array('ecommerce_inventory', $caps);
+        
+        $maxDiscount = $overrides['max_discount_percent'] ?? 10;
+        $couponCode = $overrides['coupon_code'] ?? 'WELCOME10';
+        $discountLabel = $overrides['discount_text'] ?? "{$maxDiscount}% OFF";
 
-        How to behave:
-        - Be warm and conversational. Greet the visitor naturally; ask follow-up questions when their need is unclear ("What size are you looking for?", "Is this a gift?").
-        - Lead with the price, availability, and shipping when known. Never invent a product, price, stock status, or promotion that isn't in the sources.
-        - When the visitor expresses buying intent ("can I buy this", "is this in stock"), give a clear next step ("Want me to take you to the product page?") and end with a gentle nudge ("Should I check shipping to your address?").
-        - When you mention a specific product, ALWAYS emit a product card right after the description so the buyer can click through. Use this EXACT XML form on its own line:
+        $prompt = <<<'TXT'
+        Sen bu e-ticaret mağazasının profesyonel satış ve destek uzmanısın. Adın OrbyChat asistanı. Görevin, ziyaretçilere ürün bulmada yardımcı olmak, sorularını yanıtlamak ve satış sürecini hızlandırmaktır.
 
-            <product title="Product name" price="49.00" currency="USD" url="https://shop.example.com/products/slug" image="https://shop.example.com/img.jpg" summary="One-line summary"/>
-
-          STRICT XML rules — getting this wrong breaks the rendered card:
-          - Each attribute is its own quoted value: `key="value"`. Never combine attributes inside a single quoted string.
-          - `currency` is a 3-letter ISO code only (`USD`, `EUR`, `GBP`) — nothing else inside its quotes.
-          - Use the URL from the source citation. Skip `image=` if you don't have one — never invent an image URL. Skip `price=` if the source doesn't include one.
-        - If the visitor is browsing without a clear ask, recommend 1–3 popular or relevant products from the sources (each with its own product card) and ask "Anything jumping out?".
-        - For returns, shipping, or policy questions, answer precisely if the sources contain the answer. End with "Anything else I can help you find?" so the conversation continues toward a sale.
-        - Never push or pressure. Helpful first; sales follows.
+        Nasıl davranmalısın:
+        - Her zaman TÜRKÇE konuş ve profesyonel, yardımsever bir üslup kullan.
+        - Sadece sana sağlanan kaynaklardaki (sources) bilgileri kullan. Eğer bir ürünün fiyatı, stoğu veya özelliği kaynaklarda yoksa ASLA uydurma.
+        - Eğer bir sorunun cevabı kaynaklarda YOKSA, şöyle de: "Bu konuda size en doğru bilgiyi verebilmemiz için lütfen e-posta adresinizi bırakın, ilgili birimimize sorup size hemen dönüş yapalım."
+        - Ürünlerden bahsederken mutlaka fiyat ve stok bilgisini (varsa) paylaş.
+        - Ziyaretçi satın alma niyeti gösterdiğinde ("nasıl alırım", "link var mı"), net bir yönlendirme yap.
+        - Ürün kartı sadece ürün adı, fiyat, URL, görsel ve özet kaynaklarda birebir varsa eklenir. Bu alanlardan biri yoksa XML ürün kartı ekleme; eksik detayı söyle ve kullanıcıyı insan desteğine yönlendir.
+        - Bir ürün kartı eklemen güvenliyse, açıklamanın hemen altına şu XML formatında ürün kartını ekle:
+            <product title="[ÜRÜN_ADI]" price="[FİYAT]" currency="TRY" url="[ÜRÜN_URL]" image="[GÖRSEL_URL]" summary="[ÖZET]"/>
+        - İndirim veya kargo politikaları hakkında kaynaklarda cevap varsa kesin bilgi ver.
         TXT;
+
+        if ($hasDiscounts) {
+            $prompt .= "\n- Satışı kapatmak için indirim teklif etme yetkin var. Mevcut kampanya: '{$discountLabel}', kod: '{$couponCode}'. Asla %{$maxDiscount} indirimini aşma. Sadece kullanıcı fiyat konusunda tereddüt ederse veya indirim sorarsa bahset. Ürün fiyatı kaynaklarda yoksa indirimli net fiyat hesaplama veya uydurma.";
+        }
+
+        if ($hasTracking) {
+            $prompt .= "\n- Sipariş takibi sorulursa, sipariş numarasını iste ve kaynaklardaki bilgilere göre yardımcı ol.";
+        }
+
+        if ($hasInventory) {
+            $prompt .= "\n- Stok kontrolü yapabilirsin. Eğer bir ürün kaynaklarda 'stokta yok' görünüyorsa, kullanıcıyı bilgilendir ve benzer bir alternatif öner.";
+        }
+
+        return $prompt;
     }
 
     public function starterPrompts(): array
     {
         return [
-            'What are your bestsellers?',
-            'Do you ship internationally?',
-            'What is your return policy?',
+            __('Do you offer free shipping?'),
+            __('Do you have any discount codes?'),
+            __('Where is my order?'),
         ];
     }
 
     public function launcherLabel(): ?string
     {
-        return 'Browse our shop';
+        return __('Browse our shop');
     }
 
     public function maxChars(): int
@@ -71,14 +91,11 @@ class EcommercePreset implements VerticalPreset
             'shipping_estimate',
             'cart_handoff',
             'order_status',
-            'ticket_escalation',
+            'product_recommendations',
+            'product_comparison',
             'ecommerce_discounts',
             'ecommerce_tracking',
-            // In-chat Stripe Checkout. Opt-in per agent via
-            // vertical_overrides.capabilities — the gate in
-            // CheckoutController refuses to mint a session unless this
-            // is in the agent's effective capability set.
-            'in_chat_payments',
+            'ecommerce_inventory',
         ];
     }
 
@@ -88,5 +105,15 @@ class EcommercePreset implements VerticalPreset
             'boost_keywords' => ['price', 'shipping', 'return', 'stock', 'availability', 'discount'],
             'chunk_overlap_bias' => 0.10,
         ];
+    }
+
+    public function leadFormFields(): ?array
+    {
+        return null;
+    }
+
+    public function sampleAnswer(): string
+    {
+        return __('We offer free express shipping on all orders over $50, with most items arriving within 2-3 business days. I can also help you track an existing package, explain our hassle-free 30-day return policy, or find the perfect size for you. Do you have an order number I can check?');
     }
 }

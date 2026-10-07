@@ -13,32 +13,68 @@ class SaasPreset implements VerticalPreset
 
     public function label(): string
     {
-        return 'SaaS product';
+        return __('SaaS product');
     }
 
     public function shortDescription(): string
     {
-        return 'Software product with pricing, features, and signup';
+        return __('Software product with pricing, features, and signup');
     }
 
-    public function systemPromptFragment(): string
+    public function systemPromptFragment(\App\Models\Agent $agent): string
     {
-        return <<<'TXT'
-        This is a SaaS product website. You are a friendly product specialist whose job is to help the visitor evaluate the product, see the right plan, and start a free trial or demo when the fit is good.
+        $overrides = (array) ($agent->vertical_overrides ?? []);
+        $caps = $overrides['capabilities'] ?? $this->capabilities();
+
+        $hasDiscounts = in_array('saas_discounts', $caps);
+        $hasRecommendations = in_array('saas_plan_recommendations', $caps);
+        $hasExtensions = in_array('saas_trial_extensions', $caps);
+        $hasTroubleshooting = in_array('saas_troubleshooting', $caps);
+
+        $maxDiscount = $overrides['max_discount_percent'] ?? 25;
+        $couponCode = $overrides['coupon_code'] ?? 'SAAS25';
+        $discountLabel = $overrides['discount_text'] ?? "{$maxDiscount}% OFF";
+
+        $cta = 'Start free trial';
+        $prompt = <<<TXT
+        You are a product expert for this SaaS platform. Your goal is to help visitors understand the value we provide, find the right plan, and get started smoothly.
 
         How to behave:
-        - Be warm and consultative. Ask one or two clarifying questions when the visitor's need is unclear ("How big is your team?", "Are you replacing an existing tool?").
-        - When asked about pricing, list every plan in the sources with its price and the headline difference between plans. Don't make a visitor guess what makes Pro different from Team.
-        - When you mention a specific plan, ALWAYS emit a pricing card right after the description so the visitor can click through. Use this EXACT XML form on its own line:
+        - Prioritize answering the visitor's questions accurately using the provided sources.
+        - Be warm, helpful, and professional. Speak as part of the team.
+        - If the visitor's question is broad, provide a clear overview and then ask a gentle follow-up question to help them further.
+        - When asked about pricing, ONLY use information provided in the sources. If prices are not listed, do not invent them; instead, offer to connect the user with a human specialist.
+        - When you mention a specific plan, emit a pricing card only if the exact plan name, exact price/currency, and exact signup URL are all present in the sources. Use this EXACT XML form on its own line:
 
-            <pricing title="Plan name" price="49.00" currency="USD" period="month" cta="Start free trial" url="https://app.example.com/signup?plan=pro"/>
+            <pricing title="[PLAN_NAME]" price="[PRICE]" currency="USD" period="month" cta="{$cta}" url="[SIGNUP_URL]"/>
 
-          STRICT XML rules — each attribute is its own quoted value (`key="value"`); never combine attributes inside one quoted string. `currency` is a 3-letter ISO code only. `period` is `month` or `year` — never invent another. Use the URL from the source citation. Omit `price=` if the source doesn't include one.
-        - For feature questions, name the plan that includes the feature when the sources mention plan-gating, then nudge: "Pro and above include this — want me to send you to the signup page?"
-        - When buying intent appears ("how do I sign up", "can I try this", "schedule a demo"), surface the relevant CTA card (free trial, signup, demo booking) when the sources reference one.
-        - Don't promise SLAs, security certifications, or integrations the sources don't list — flag the gap and offer to connect them with a human.
-        - End each substantive answer with a forward-moving question ("Want to try it on your data?", "Should I show you how this compares to Team?").
+          STRICT XML rules:
+          1. Use the EXACT plan name from the sources.
+          2. Use the EXACT price and currency from the sources. If no exact price is found, DO NOT emit the pricing card.
+          3. Use the SIGNUP URL found in the sources. NEVER use "example.com" or other placeholders. If no specific signup/checkout URL is found for this plan in the sources, DO NOT emit the pricing card XML at all.
+          4. `period` is `month` or `year` only.
+        - For feature questions, name the plan that includes the feature when the sources mention plan-gating.
+        - When buying intent appears, surface the relevant CTA card (free trial, signup, demo booking) using URLs ONLY from the verified knowledge base.
+        - Don't promise SLAs, security certifications, or integrations the sources don't list.
         TXT;
+
+        if ($hasDiscounts) {
+            $prompt .= "\n- You are authorized to offer a special discount to close a deal. The current offer is '{$discountLabel}' using code '{$couponCode}'. NEVER exceed a {$maxDiscount}% discount. If the plan's exact listed price is missing from sources, do not calculate or state a discounted final price.";
+        }
+
+        if ($hasRecommendations) {
+            $prompt .= "\n- Actively recommend the most suitable plan based on the user's needs (team size, features needed).";
+        }
+
+        if ($hasExtensions) {
+            $prompt .= "\n- If a user is hesitant because the trial is too short, you can mention that we sometimes offer trial extensions for qualified teams.";
+        }
+
+        if ($hasTroubleshooting) {
+            $prompt .= "\n- Help users troubleshoot basic technical issues using information from the documentation sources.";
+        }
+
+        return $prompt;
     }
 
     public function starterPrompts(): array
@@ -67,18 +103,28 @@ class SaasPreset implements VerticalPreset
             'signup_handoff',
             'feature_compare',
             'account_status',
-            'ticket_escalation',
-            // In-chat Stripe Checkout. Opt-in per agent via
-            // vertical_overrides.capabilities.
-            'in_chat_payments',
+            'saas_discounts',
+            'saas_plan_recommendations',
+            'saas_trial_extensions',
+            'saas_troubleshooting',
         ];
     }
 
     public function retrievalTuning(): array
     {
         return [
-            'boost_keywords' => ['pricing', 'plan', 'feature', 'trial', 'demo', 'integration'],
-            'chunk_overlap_bias' => 0.10,
+            'boost_keywords' => ['pricing', 'subscription', 'features', 'trial', 'api', 'support'],
+            'chunk_overlap_bias' => 0.08,
         ];
+    }
+
+    public function leadFormFields(): ?array
+    {
+        return null;
+    }
+
+    public function sampleAnswer(): string
+    {
+        return __('Our platform is built to scale with your business, offering deep integrations with tools like HubSpot, Salesforce, and Slack to automate your entire workflow. I can help you understand our API limits, security compliance, or set up a personalized demo to show you the ROI for your specific use case.');
     }
 }

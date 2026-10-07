@@ -138,7 +138,7 @@ class PromptBuilder
         if ($effectiveSiteType !== null) {
             $registry = $this->presets ?? new VerticalPresetRegistry;
             $preset = $registry->for((string) $effectiveSiteType);
-            $fragment = trim($preset->systemPromptFragment());
+            $fragment = trim($preset->systemPromptFragment($agent));
             if ($fragment !== '') {
                 $system .= "\nVertical context (site type: {$preset->slug()}):\n{$fragment}\n### END VERTICAL CONTEXT ###\n";
             }

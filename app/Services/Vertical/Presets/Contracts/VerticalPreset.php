@@ -32,8 +32,10 @@ interface VerticalPreset
      * Vertical-specific instructions appended to the LLM system prompt
      * AFTER sources but BEFORE the admin's custom system_prompt — admin
      * always wins. Empty string for the generic preset.
+     *
+     * @param  \App\Models\Agent  $agent
      */
-    public function systemPromptFragment(): string;
+    public function systemPromptFragment(\App\Models\Agent $agent): string;
 
     /**
      * Default starter prompts (chips shown in the widget when no messages
@@ -72,4 +74,17 @@ interface VerticalPreset
      * @return array{boost_keywords: array<int, string>, chunk_overlap_bias: float}
      */
     public function retrievalTuning(): array;
+
+    /**
+     * Default lead_form_fields schema for this vertical. NULL means
+     * use the platform default (Name + Email).
+     *
+     * @return array<int, array<string, mixed>>|null
+     */
+    public function leadFormFields(): ?array;
+
+    /**
+     * A sample answer for the first starter prompt, used for marketing previews.
+     */
+    public function sampleAnswer(): string;
 }

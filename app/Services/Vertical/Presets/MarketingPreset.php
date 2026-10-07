@@ -13,45 +13,57 @@ class MarketingPreset implements VerticalPreset
 
     public function label(): string
     {
-        return 'Marketing site';
+        return __('Marketing site');
     }
 
     public function shortDescription(): string
     {
-        return 'Lead-capture pages, blog, and top-of-funnel content';
+        return __('Lead-capture pages, blog, and top-of-funnel content');
     }
 
-    public function systemPromptFragment(): string
+    public function systemPromptFragment(\App\Models\Agent $agent): string
     {
-        return <<<'TXT'
-        This is a marketing / lead-generation site. You are a friendly business-development rep whose job is to qualify the visitor and move them toward a meeting, demo, or quote.
+        $overrides = (array) ($agent->vertical_overrides ?? []);
+        $caps = $overrides['capabilities'] ?? $this->capabilities();
+        $hasLeadCapture = in_array('lead_capture_inline', $caps);
+        $hasDemo = in_array('demo_booking', $caps);
+        $hasCaseStudy = in_array('case_study_card', $caps);
+
+        $prompt = "You are a knowledgeable product expert. Your goal is to help visitors understand how we can solve their problems.
 
         How to behave:
-        - Open warmly. If the visitor seems exploratory, ask one qualifier ("What are you trying to solve?", "Roughly what size is your team?") before pitching.
-        - Be persuasive but never inflate. Use only claims and stats present in the sources. If a fact isn't in the sources, say so honestly.
-        - Case studies and testimonials are gold. When the sources contain one that fits the visitor's question, cite it with [n] AND emit a case study card on its own line:
+        - Prioritize answering the visitor's questions accurately using the provided sources.
+        - Be warm and professional. Speak as a helpful member of the team.
+        - If the visitor's question is broad, provide a clear overview and then ask a gentle follow-up to guide them further.";
 
-            <case-study title="ACME Co. cut onboarding by 40%" outcome="Reduced new-hire ramp-up from 6 weeks to 3" url="https://example.com/case/acme"/>
+        if ($hasCaseStudy) {
+            $prompt .= "\n- Case studies and testimonials are gold. When the sources contain one that fits the visitor's question AND the exact case-study URL is present in sources, cite it with [n] AND emit a case study card on its own line:
+            <case-study title=\"[CASE_TITLE]\" outcome=\"[KEY_RESULT]\" url=\"[CASE_URL]\"/>";
+        }
 
-          STRICT XML rules — each attribute is its own quoted value (`key="value"`); never combine attributes inside one quoted string. Use the URL from the source citation. Skip `outcome=` if the source doesn't include one — never invent metrics.
-        - When the visitor's question signals high intent ("can you do X for me", "how do I work with you", "what's the price"), surface the relevant CTA (book a call, request quote, request demo) explicitly and end with a yes/no question that moves them forward.
-        - For pricing or scope questions where the sources don't have a number, propose a brief intake ("I'd love to put together a tailored quote — could I take your email and one or two details about your project?") instead of guessing a price.
-        - Keep replies focused. One clear answer + one forward action beats a wall of features.
-        TXT;
+        if ($hasDemo) {
+            $prompt .= "\n- When buying intent appears, surface the demo booking card:
+            <ticket label=\"Book a Demo\"/>";
+        }
+
+        $prompt .= "\n- For pricing or scope questions where the sources don't have a number, propose a brief intake (\"I'd love to put together a tailored quote — could I take your email and one or two details about your project?\") instead of guessing a price.
+        - Keep replies focused. One clear answer + one forward action beats a wall of features.";
+
+        return $prompt;
     }
 
     public function starterPrompts(): array
     {
         return [
-            'What do you offer?',
-            'Can I see a case study?',
-            'How do we get started?',
+            'Tell me more about this',
+            'How do I get started?',
+            'Can I see a demo?',
         ];
     }
 
     public function launcherLabel(): ?string
     {
-        return 'Talk to us';
+        return 'Ask about the product';
     }
 
     public function maxChars(): int
@@ -65,13 +77,6 @@ class MarketingPreset implements VerticalPreset
             'lead_capture_inline',
             'demo_booking',
             'case_study_card',
-            // Every preset exposes `ticket_escalation` so the LLM can
-            // hand the visitor off to a human regardless of vertical.
-            // Operators that don't run a live-chat shift can either
-            // remove the capability via vertical_overrides, or rely on
-            // RequestHumanController returning offline_no_operators —
-            // visitors then still hear "we'll email you back".
-            'ticket_escalation',
         ];
     }
 
@@ -81,5 +86,15 @@ class MarketingPreset implements VerticalPreset
             'boost_keywords' => ['service', 'case study', 'pricing', 'contact', 'consultation', 'demo'],
             'chunk_overlap_bias' => 0.08,
         ];
+    }
+
+    public function leadFormFields(): ?array
+    {
+        return null;
+    }
+
+    public function sampleAnswer(): string
+    {
+        return __('Our platform helps you scale your outreach and improve conversion rates through AI-driven insights. Would you like to see some case studies from similar businesses in your industry, or learn more about our campaign automation features?');
     }
 }
