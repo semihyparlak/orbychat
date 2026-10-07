@@ -138,7 +138,19 @@
 
         @fonts
         @viteReactRefresh
-        @vite(['resources/css/app.css', 'resources/js/app.tsx', "resources/js/pages/{$page['component']}.tsx"])
+        @php
+            $pageComponent = "resources/js/pages/{$page['component']}.tsx";
+            $viteInputs = ['resources/css/app.css', 'resources/js/app.tsx'];
+            try {
+                if (\Illuminate\Support\Facades\Vite::isRunningHot() || \Illuminate\Support\Facades\File::exists(public_path('build/manifest.json'))) {
+                    $manifest = json_decode(@file_get_contents(public_path('build/manifest.json')) ?: '{}', true);
+                    if (isset($manifest[$pageComponent])) {
+                        $viteInputs[] = $pageComponent;
+                    }
+                }
+            } catch (\Throwable) {}
+        @endphp
+        @vite($viteInputs)
         <x-inertia::head>
             <title>{{ $seoTitle }}</title>
         </x-inertia::head>
