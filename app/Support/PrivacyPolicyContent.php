@@ -12,51 +12,51 @@ class PrivacyPolicyContent
     public static function defaults(): array
     {
         return [
-            'eyebrow' => __('Privacy & GDPR'),
-            'title' => __('Privacy policy'),
-            'summary' => __('How OrbyChat collects, uses, stores, and deletes visitor and workspace data when the AI bar is installed on a site.'),
-            'effective_date' => __('7 May 2026'),
+            'eyebrow' => 'Privacy & GDPR',
+            'title' => 'Privacy policy',
+            'summary' => 'How OrbyChat collects, uses, stores, and deletes visitor and workspace data when the AI bar is installed on a site.',
+            'effective_date' => '7 May 2026',
             'contact' => [
-                'team_name' => __('OrbyChat Privacy Team'),
+                'team_name' => 'Orby Privacy Team',
                 'email' => 'privacy@orby.chat',
-                'response_sla' => __('We respond to verified privacy requests within 30 days.'),
+                'response_sla' => 'We respond to verified privacy requests within 30 days.',
             ],
             'collection' => [
-                'summary' => __('We collect only the data needed to run the assistant, route leads, and keep the service secure.'),
+                'summary' => 'We collect only the data needed to run the assistant, route leads, and keep the service secure.',
                 'items' => [
-                    __('Conversation history between visitors and the assistant.'),
-                    __('Anonymous visitor identifiers, hashed IP data, browser metadata, and page context for abuse prevention and analytics.'),
-                    __('Lead details such as name, email, phone, and custom fields only when a visitor submits them deliberately.'),
+                    'Conversation history between visitors and the assistant.',
+                    'Anonymous visitor identifiers, hashed IP data, browser metadata, and page context for abuse prevention and analytics.',
+                    'Lead details such as name, email, phone, and custom fields only when a visitor submits them deliberately.',
                 ],
             ],
             'usage' => [
-                'summary' => __('The data is used to answer visitors, notify your team about qualified leads, improve routing quality, and protect the service from misuse.'),
+                'summary' => 'The data is used to answer visitors, notify your team about qualified leads, improve routing quality, and protect the service from misuse.',
                 'items' => [
-                    __('Generate AI responses and maintain conversation context.'),
-                    __('Route captured leads to inboxes, Slack, email, and outbound webhooks configured by the workspace.'),
-                    __('Measure product performance, detect abuse, and troubleshoot delivery issues.'),
+                    'Generate AI responses and maintain conversation context.',
+                    'Route captured leads to inboxes, Slack, email, and outbound webhooks configured by the workspace.',
+                    'Measure product performance, detect abuse, and troubleshoot delivery issues.',
                 ],
             ],
             'retention' => [
-                'summary' => __('Workspace data remains available until the workspace deletes it, exports it, or asks for removal through an authenticated privacy request.'),
+                'summary' => 'Workspace data remains available until the workspace deletes it, exports it, or asks for removal through an authenticated privacy request.',
                 'items' => [
-                    __('Visitors can remove their own widget conversation history using the in-widget deletion flow.'),
-                    __('Lead routing logs and operational metadata may be retained for fraud prevention, billing, and auditability.'),
-                    __('Backups age out on the platform retention schedule and are deleted automatically after their recovery window closes.'),
+                    'Visitors can remove their own widget conversation history using the in-widget deletion flow.',
+                    'Lead routing logs and operational metadata may be retained for fraud prevention, billing, and auditability.',
+                    'Backups age out on the platform retention schedule and are deleted automatically after their recovery window closes.',
                 ],
             ],
             'rights' => [
-                'summary' => __('Depending on your region, you may be entitled to request access, correction, export, restriction, or deletion of personal data.'),
+                'summary' => 'Depending on your region, you may be entitled to request access, correction, export, restriction, or deletion of personal data.',
                 'items' => [
-                    __('Request a copy of personal data associated with a visitor or workspace record.'),
-                    __('Ask for correction or deletion of inaccurate or outdated information.'),
-                    __('Withdraw consent for optional follow-up communication at any time.'),
+                    'Request a copy of personal data associated with a visitor or workspace record.',
+                    'Ask for correction or deletion of inaccurate or outdated information.',
+                    'Withdraw consent for optional follow-up communication at any time.',
                 ],
             ],
             'gdpr' => [
-                'summary' => __('OrbyChat supports GDPR-aligned deletion workflows for widget conversations and manual review for broader export or erasure requests.'),
+                'summary' => 'OrbyChat supports GDPR-aligned deletion workflows for widget conversations and manual review for broader export or erasure requests.',
                 'request_email' => 'privacy@orby.chat',
-                'request_instructions' => __('Include the workspace name, the visitor identifier or email if known, and the request type so we can verify and fulfill it safely.'),
+                'request_instructions' => 'Include the workspace name, the visitor identifier or email if known, and the request type so we can verify and fulfill it safely.',
             ],
         ];
     }
@@ -68,6 +68,16 @@ class PrivacyPolicyContent
     {
         $defaults = self::defaults();
         $resolved = array_replace_recursive($defaults, is_array($content) ? $content : []);
+
+        array_walk_recursive($resolved, static function (&$item) {
+            if (is_string($item)) {
+                $item = str_ireplace(
+                    ['OrbyChat Privacy Team', 'OrbyChat Inc', 'OrbyChat AI', 'OrbyChat', 'privacy@orbychat.ai', 'orbychat.ai', 'orbychat.dev', 'orbychat'],
+                    ['Orby Privacy Team', 'OrbyChat Inc', 'OrbyChat AI', 'OrbyChat', 'privacy@orby.chat', 'orby.chat', 'orby.chat', 'orbychat'],
+                    $item,
+                );
+            }
+        });
 
         $resolved['eyebrow'] = self::normalizeText($resolved['eyebrow'] ?? null, $defaults['eyebrow']);
         $resolved['title'] = self::normalizeText($resolved['title'] ?? null, $defaults['title']);

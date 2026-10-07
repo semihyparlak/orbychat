@@ -5,6 +5,13 @@ namespace App\Services\Tools;
 use App\Models\Agent;
 use App\Services\Tools\Contracts\Tool;
 use App\Services\Tools\Tools\EscalateToHumanTool;
+use App\Services\Tools\Tools\LookupOrderClient;
+use App\Services\Tools\Tools\LookupOrderTool;
+use App\Services\Tools\Tools\OpenTicketTool;
+use App\Services\Tools\Tools\SendKbArticleTool;
+use App\Services\Tools\Tools\ApplyCouponTool;
+use App\Services\Tools\Tools\TrackOrderTool;
+use App\Services\Integrations\EcommerceActionService;
 use App\Services\Vertical\VerticalPresetRegistry;
 
 /**
@@ -22,15 +29,20 @@ class ToolRegistry
 {
     /** @var array<string, Tool> */
     private array $tools;
+    private ?EcommerceActionService $ecommerceActions = null;
 
     public function __construct(
         private VerticalPresetRegistry $presets,
-        private \App\Services\Integrations\EcommerceActionService $ecommerceActions
+        ?EcommerceActionService $ecommerceActions = null
     ) {
+        $this->ecommerceActions = $ecommerceActions ?? app(EcommerceActionService::class);
         $this->tools = [
             'escalate_to_human' => new EscalateToHumanTool,
-            'apply_coupon' => new \App\Services\Tools\Tools\ApplyCouponTool($this->ecommerceActions),
-            'track_order' => new \App\Services\Tools\Tools\TrackOrderTool($this->ecommerceActions),
+            'lookup_order' => new LookupOrderTool(new LookupOrderClient),
+            'open_ticket' => new OpenTicketTool,
+            'send_kb_article' => new SendKbArticleTool,
+            'apply_coupon' => new ApplyCouponTool($this->ecommerceActions),
+            'track_order' => new TrackOrderTool($this->ecommerceActions),
         ];
     }
 
@@ -45,6 +57,17 @@ class ToolRegistry
     public function get(string $name): ?Tool
     {
         return $this->tools[$name] ?? null;
+    }
+
+    /**
+     * Append a tool at runtime. Two consumers: tests injecting stub
+     * tools, and future dynamic tool sources (e.g. MCP servers
+     * registering namespaced tools) — neither should edit the
+     * constructor list.
+     */
+    public function register(Tool $tool): void
+    {
+        $this->tools[$tool->name()] = $tool;
     }
 
     /**

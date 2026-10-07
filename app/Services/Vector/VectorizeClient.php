@@ -28,8 +28,13 @@ class VectorizeClient implements QdrantClient
 
     public static function default(string $accountId, string $apiToken, ?Guzzle $http = null): self
     {
+        // 30s overall, 10s connect. The previous 15s ceiling was too tight
+        // for cold Cloudflare reads on first request of a worker process —
+        // it caused ensureCollection() to misread an existing index as
+        // "doesn't exist", then POST /indexes and get duplicate_name back,
+        // failing the whole IndexDocumentJob.
         return new self(
-            $http ?? new Guzzle(['timeout' => 15]),
+            $http ?? new Guzzle(['timeout' => 30, 'connect_timeout' => 10]),
             $accountId,
             $apiToken,
         );
@@ -39,6 +44,28 @@ class VectorizeClient implements QdrantClient
     {
         if ($points === []) {
             return;
+        }
+
+        // Validate every vector's length BEFORE we waste a round trip
+        // to Cloudflare. Buyer-reported 2026-05-15 (whispbar): a model
+        // change (bge-base 768 → bge-m3 1024) without matching index
+        // re-creation produced an opaque
+        // `invalid vector for id="…", expected 768 dimensions, and got
+        // 1024 dimensions` 400 on every job. We now fail with an
+        // actionable message that names the configured model and the
+        // recovery command.
+        $expected = $this->resolveVectorDim();
+        foreach ($points as $p) {
+            $actual = is_array($p['vector'] ?? null) ? count($p['vector']) : 0;
+            if ($actual !== $expected) {
+                throw new \RuntimeException(sprintf(
+                    'Vectorize upsert blocked: vector length %d does not match index dimension %d. '
+                    .'The configured embedding model is producing a different size than the Vectorize index was provisioned for. '
+                    .'Run `php artisan vector:rebuild-index` to drop + recreate the index at the model\'s native dim, then re-index sources.',
+                    $actual,
+                    $expected,
+                ));
+            }
         }
 
         // Vectorize ingests NDJSON: one JSON object per line.
@@ -63,6 +90,24 @@ class VectorizeClient implements QdrantClient
 
     public function search(string $collection, array $vector, array $filter, int $limit): array
     {
+        // Pre-flight dim guard. Same mismatch class as the upsert path:
+        // operator changed `CLOUDFLARE_EMBED_MODEL` but the existing
+        // Vectorize index was provisioned at the older dim. Cloudflare
+        // returns code 40006 "invalid query vector, expected N
+        // dimensions" — opaque and prone to retry loops. Fail locally
+        // with the recovery hint so playground / hot-path callers see
+        // an actionable message.
+        $expected = $this->resolveVectorDim();
+        if (count($vector) !== $expected) {
+            throw new \RuntimeException(sprintf(
+                'Vectorize query blocked: vector length %d does not match index dimension %d. '
+                .'The configured embedding model is producing a different size than the Vectorize index was provisioned for. '
+                .'Run `php artisan vector:rebuild-index` to drop + recreate the index at the model\'s native dim, then re-index sources.',
+                count($vector),
+                $expected,
+            ));
+        }
+
         $body = [
             'vector' => $vector,
             'topK' => $limit,
@@ -127,22 +172,65 @@ class VectorizeClient implements QdrantClient
     {
         $exists = false;
         try {
-            $this->request('GET', "indexes/{$name}");
+            $info = $this->request('GET', "indexes/{$name}");
             $exists = true;
+
+            // Validate the existing index dim matches what we want to
+            // upsert. Buyer-reported (whispbar, 2026-05-15): operator
+            // changed CLOUDFLARE_EMBED_MODEL from bge-base (768) to
+            // bge-m3 (1024) but the index was already provisioned at
+            // 768 — every IndexDocumentJob then died with an opaque
+            // 40012 "invalid vector". Surface the mismatch here, before
+            // we burn an embedding round-trip on every chunk.
+            $existingDim = (int) ($info['result']['config']['dimensions']
+                ?? $info['result']['dimensions']
+                ?? 0);
+            if ($existingDim > 0 && $existingDim !== $dim) {
+                throw new \RuntimeException(sprintf(
+                    'Vectorize index "%s" exists at %d dimensions but the configured embedding model requires %d. '
+                    .'Either point CLOUDFLARE_EMBED_MODEL back at a %d-dim model OR run '
+                    .'`php artisan vector:rebuild-index` to drop + recreate the index at %d dimensions (re-indexes every Source).',
+                    $name,
+                    $existingDim,
+                    $dim,
+                    $existingDim,
+                    $dim,
+                ));
+            }
+        } catch (\RuntimeException $e) {
+            // Re-throw our own actionable mismatch error so callers see it.
+            if (str_contains($e->getMessage(), 'Vectorize index')) {
+                throw $e;
+            }
+            // GET hit a 404 OR a transient (timeout / 5xx / network blip).
+            // We can't distinguish from here — fall through to POST and
+            // swallow the duplicate_name response below if it turns out
+            // the index did exist all along.
         } catch (\Throwable) {
-            // create below
+            // Same as above for non-RuntimeException paths.
         }
 
         if (! $exists) {
-            $this->request('POST', 'indexes', [
-                'json' => [
-                    'name' => $name,
-                    'config' => [
-                        'dimensions' => $dim,
-                        'metric' => strtolower($distance),
+            try {
+                $this->request('POST', 'indexes', [
+                    'json' => [
+                        'name' => $name,
+                        'config' => [
+                            'dimensions' => $dim,
+                            'metric' => strtolower($distance),
+                        ],
                     ],
-                ],
-            ]);
+                ]);
+            } catch (\Throwable $e) {
+                // Cloudflare returns `vectorize.index.duplicate_name`
+                // (code 3002) when the index already exists. That's the
+                // race-with-create OR transient-GET-but-index-exists case
+                // — treat as success. Anything else (auth, quota, server
+                // error) still escapes so the job fails loudly.
+                if (! str_contains($e->getMessage(), 'duplicate_name')) {
+                    throw $e;
+                }
+            }
         }
 
         // Create metadata indexes for the fields we filter by. Cloudflare
@@ -155,6 +243,26 @@ class VectorizeClient implements QdrantClient
                 ]);
             } catch (\Throwable) {
                 // Already exists; that's fine.
+            }
+        }
+    }
+
+    /**
+     * Drop a Vectorize index. Used by the operator-facing
+     * `vector:rebuild-index` artisan command when the index dimension
+     * needs to change (e.g. after switching CLOUDFLARE_EMBED_MODEL
+     * from bge-base 768 → bge-m3 1024). Idempotent: a 404 is treated
+     * as success.
+     */
+    public function dropCollection(string $name): void
+    {
+        try {
+            $this->request('DELETE', "indexes/{$name}");
+        } catch (\Throwable $e) {
+            if (! str_contains($e->getMessage(), '404')
+                && ! str_contains($e->getMessage(), 'not_found')
+                && ! str_contains($e->getMessage(), 'does not exist')) {
+                throw $e;
             }
         }
     }
@@ -189,13 +297,15 @@ class VectorizeClient implements QdrantClient
     /**
      * Resolve the vector dimension from config when the Laravel app is
      * available; fall back to the Cloudflare bge-base default (768) for
-     * pure-PHP unit-test contexts.
+     * pure-PHP unit-test contexts. Reads through `EmbedModelDimensions`
+     * so a non-default embedding model auto-picks the right dim even
+     * when VECTOR_DIM env wasn't bumped manually.
      */
     private function resolveVectorDim(): int
     {
         try {
             if (function_exists('app') && app()->bound('config')) {
-                return (int) config('services.vector_dim', 768);
+                return EmbedModelDimensions::resolveExpectedDim();
             }
         } catch (\Throwable) {
             // app() not booted (unit test) — fall through.

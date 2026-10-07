@@ -39,6 +39,7 @@ class AppSettingsOverrideServiceProvider extends ServiceProvider
         $this->applyCloudflare($s);
         $this->applyOpenAi($s);
         $this->applyOpenRouter($s);
+        $this->applyAzureFoundry($s);
         $this->applyProviderRouting($s);
         $this->applyMail($s);
         $this->applyBranding($s);
@@ -128,10 +129,6 @@ class AppSettingsOverrideServiceProvider extends ServiceProvider
 
     private function applyCloudflare(AppSetting $s): void
     {
-        // Cloudflare config is consumed via env() in AppServiceProvider's
-        // OpenAiClient resolver. Mirror to env-via-config so the resolver
-        // can read it back through config('services.cloudflare.*') after
-        // we update AppServiceProvider to look there.
         if ($s->cloudflare_account_id) {
             config(['services.cloudflare.account_id' => $s->cloudflare_account_id]);
         }
@@ -151,6 +148,15 @@ class AppSettingsOverrideServiceProvider extends ServiceProvider
         if ($s->cloudflare_vectorize_index) {
             config(['services.cloudflare.vectorize_index' => $s->cloudflare_vectorize_index]);
         }
+
+        if ($s->cloudflare_ai_gateway_url) {
+            config(['services.cloudflare.ai_gateway_url' => $s->cloudflare_ai_gateway_url]);
+        }
+
+        // Browser Rendering is a boolean toggle — admins can disable it
+        // when they hit Cloudflare's free-tier daily cap. Always mirror
+        // the DB value (boolean cast guarantees true/false, never null).
+        config(['services.cloudflare.browser_rendering' => (bool) $s->cloudflare_browser_rendering]);
     }
 
     private function applyOpenAi(AppSetting $s): void
@@ -176,6 +182,31 @@ class AppSettingsOverrideServiceProvider extends ServiceProvider
 
         if ($s->openrouter_chat_model) {
             config(['services.openrouter.chat_model' => $s->openrouter_chat_model]);
+        }
+    }
+
+    private function applyAzureFoundry(AppSetting $s): void
+    {
+        config(['services.azure_foundry.enabled' => (bool) $s->azure_foundry_enabled]);
+
+        if ($s->azure_foundry_endpoint) {
+            config(['services.azure_foundry.endpoint' => $s->azure_foundry_endpoint]);
+        }
+
+        if ($s->azure_foundry_api_key) {
+            config(['services.azure_foundry.api_key' => $s->azure_foundry_api_key]);
+        }
+
+        if ($s->azure_foundry_deployment) {
+            config(['services.azure_foundry.deployment' => $s->azure_foundry_deployment]);
+        }
+
+        if ($s->azure_foundry_embed_model) {
+            config(['services.azure_foundry.embed_model' => $s->azure_foundry_embed_model]);
+        }
+
+        if ($s->azure_foundry_api_version) {
+            config(['services.azure_foundry.api_version' => $s->azure_foundry_api_version]);
         }
     }
 
@@ -252,12 +283,16 @@ class AppSettingsOverrideServiceProvider extends ServiceProvider
             config(['branding.favicon_path' => $s->favicon_path]);
         }
 
-        if ($s->orbychat_brand_url) {
-            config(['branding.url' => $s->orbychat_brand_url]);
+        $brandUrl = $s->pitchbar_brand_url ?? $s->orbychat_brand_url ?? null;
+        if ($brandUrl) {
+            $brandUrl = str_ireplace(['pitchbar.dev', 'pitchbar.ai', 'pitchbar'], ['orby.chat', 'orby.chat', 'orbychat'], $brandUrl);
+            config(['branding.url' => $brandUrl]);
         }
 
-        if ($s->orbychat_brand_label) {
-            config(['branding.label' => $s->orbychat_brand_label]);
+        $brandLabel = $s->pitchbar_brand_label ?? $s->orbychat_brand_label ?? null;
+        if ($brandLabel) {
+            $brandLabel = str_ireplace('Pitchbar', 'OrbyChat', $brandLabel);
+            config(['branding.label' => $brandLabel]);
         }
     }
 }

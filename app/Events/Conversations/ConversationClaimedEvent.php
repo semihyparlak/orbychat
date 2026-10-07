@@ -2,6 +2,7 @@
 
 namespace App\Events\Conversations;
 
+use App\Events\Concerns\BroadcastsWhenConfigured;
 use Illuminate\Broadcasting\Channel;
 use Illuminate\Broadcasting\InteractsWithSockets;
 use Illuminate\Broadcasting\PrivateChannel;
@@ -11,7 +12,7 @@ use Illuminate\Queue\SerializesModels;
 
 class ConversationClaimedEvent implements ShouldBroadcast
 {
-    use Dispatchable, InteractsWithSockets, SerializesModels;
+    use BroadcastsWhenConfigured, Dispatchable, InteractsWithSockets, SerializesModels;
 
     public function __construct(
         public string $conversationId,

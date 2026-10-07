@@ -50,7 +50,8 @@ interface Tool
      * render inline.
      *
      * @param  array<string, mixed>  $args
+     * @param  array<string, mixed>  $context  Optional per-turn context — today carries `conversation` (the Conversation model) for tools that need shopper identity or other turn-specific data.
      * @return array{result: array<string, mixed>, block?: array{type: string, payload: array<string, mixed>}}
      */
-    public function execute(array $args, Agent $agent): array;
+    public function execute(array $args, Agent $agent, array $context = []): array;
 }

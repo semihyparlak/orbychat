@@ -13,15 +13,15 @@ class InternalKbPreset implements VerticalPreset
 
     public function label(): string
     {
-        return __('Internal knowledge base');
+        return 'Internal knowledge base';
     }
 
     public function shortDescription(): string
     {
-        return __('Employee wiki, runbooks, and internal documentation');
+        return 'Employee wiki, runbooks, and internal documentation';
     }
 
-    public function systemPromptFragment(\App\Models\Agent $agent): string
+    public function systemPromptFragment(): string
     {
         return <<<'TXT'
         This is an internal knowledge base for employees. When answering:
@@ -35,9 +35,9 @@ class InternalKbPreset implements VerticalPreset
     public function starterPrompts(): array
     {
         return [
-            __('What is our PTO policy?'),
-            __('Who owns billing?'),
-            __('How do I file an expense?'),
+            'What is our PTO policy?',
+            'Who owns billing?',
+            'How do I file an expense?',
         ];
     }
 
@@ -57,6 +57,7 @@ class InternalKbPreset implements VerticalPreset
             'policy_lookup',
             'team_handoff',
             'auth_aware',
+            'ticket_escalation',
         ];
     }
 
@@ -66,15 +67,5 @@ class InternalKbPreset implements VerticalPreset
             'boost_keywords' => ['policy', 'owner', 'oncall', 'runbook', 'sla', 'team'],
             'chunk_overlap_bias' => 0.12,
         ];
-    }
-
-    public function leadFormFields(): ?array
-    {
-        return null;
-    }
-
-    public function sampleAnswer(): string
-    {
-        return __('You can find our latest internal policies and procedure manuals here. If you are looking for HR forms, IT support guides, or company-wide announcements, I can point you to the right document immediately.');
     }
 }

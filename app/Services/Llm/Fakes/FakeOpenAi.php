@@ -16,6 +16,8 @@ class FakeOpenAi implements OpenAiClient
 
     private int $firstByteDelayMs = 0;
 
+    private ?\Throwable $streamFailure = null;
+
     private int $perTokenDelayMs = 0;
 
     /** @var array<int, string> */
@@ -70,9 +72,25 @@ class FakeOpenAi implements OpenAiClient
         $this->perTokenDelayMs = $perTokenDelayMs;
     }
 
+    /**
+     * Make the next streamChat() call throw — lets tests exercise the
+     * provider-failure path (error SSE event, error turn traces).
+     */
+    public function failNextStreamWith(\Throwable $e): void
+    {
+        $this->streamFailure = $e;
+    }
+
     public function streamChat(array $messages, array $opts = []): iterable
     {
         $this->chatCalls[] = ['messages' => $messages, 'opts' => $opts];
+
+        if ($this->streamFailure !== null) {
+            $failure = $this->streamFailure;
+            $this->streamFailure = null;
+
+            throw $failure;
+        }
 
         $text = array_shift($this->scriptedResponses) ?? $this->defaultResponse;
 

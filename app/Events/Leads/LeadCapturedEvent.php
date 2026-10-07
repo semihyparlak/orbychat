@@ -2,6 +2,7 @@
 
 namespace App\Events\Leads;
 
+use App\Events\Concerns\BroadcastsWhenConfigured;
 use App\Models\Lead;
 use Illuminate\Broadcasting\Channel;
 use Illuminate\Broadcasting\InteractsWithSockets;
@@ -22,7 +23,7 @@ use Illuminate\Queue\SerializesModels;
  */
 class LeadCapturedEvent implements ShouldBroadcast
 {
-    use Dispatchable, InteractsWithSockets, SerializesModels;
+    use BroadcastsWhenConfigured, Dispatchable, InteractsWithSockets, SerializesModels;
 
     public function __construct(
         public string $workspaceId,

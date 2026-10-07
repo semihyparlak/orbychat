@@ -4,6 +4,7 @@ namespace App\Services\Billing;
 
 use App\Models\Plan;
 use App\Support\AppBranding;
+use Stripe\Exception\InvalidRequestException;
 use Stripe\StripeClient;
 
 /**
@@ -50,12 +51,89 @@ class StripeProductSync
         }
 
         if ($plan->stripe_price_id !== null && $plan->stripe_price_id !== '') {
-            return $plan->stripe_price_id;
+            if (! $this->priceMissing($plan->stripe_price_id)) {
+                return $plan->stripe_price_id;
+            }
+
+            // Test->live key switch: the saved price was minted under the
+            // other mode's key. Drop the stale ids; syncPlan() below
+            // re-mints Product + Price under the CURRENT key.
+            \Log::warning('billing.stale_stripe_price_healed', [
+                'plan_id' => $plan->id,
+                'stale_price_id' => $plan->stripe_price_id,
+            ]);
+            $plan->forceFill([
+                'stripe_price_id' => null,
+                'stripe_product_id' => null,
+            ])->save();
         }
 
         $this->syncPlan($plan);
 
         return (string) $plan->fresh()->stripe_price_id;
+    }
+
+    /**
+     * C2: ensure a Stripe Price exists for the plan in the requested
+     * ISO 4217 currency. Lazy-mints on first checkout in that currency.
+     * Returns the price ID for the caller to pass into Cashier.
+     *
+     * `usd` falls back to the legacy `ensurePriceFor()` so existing
+     * Stripe Prices keep being honored without re-minting. Every other
+     * currency goes through `mintCurrencyPrice()` which writes the
+     * returned price ID into `plans.stripe_price_ids[currency]`.
+     *
+     * @throws \RuntimeException when the plan has no price configured
+     *                           for the requested currency.
+     */
+    public function ensurePriceForCurrency(Plan $plan, string $currency): string
+    {
+        $currency = strtolower(trim($currency));
+
+        if ($currency === 'usd' || $currency === '') {
+            return $this->ensurePriceFor($plan);
+        }
+
+        $existing = $plan->stripePriceIdFor($currency);
+        if ($existing !== null) {
+            if (! $this->priceMissing($existing)) {
+                return $existing;
+            }
+
+            // Same test->live healing as ensurePriceFor, per-currency map.
+            \Log::warning('billing.stale_stripe_price_healed', [
+                'plan_id' => $plan->id,
+                'currency' => $currency,
+                'stale_price_id' => $existing,
+            ]);
+            $map = (array) ($plan->stripe_price_ids ?? []);
+            unset($map[strtolower($currency)]);
+            $plan->forceFill([
+                'stripe_price_ids' => $map,
+                'stripe_product_id' => null,
+            ])->save();
+        }
+
+        $amount = $plan->priceFor($currency);
+        if ($amount === null || $amount <= 0) {
+            throw new \RuntimeException("Plan '{$plan->slug}' has no price set for currency '{$currency}'.");
+        }
+
+        $productId = $this->ensureProduct($plan);
+        $price = $this->stripe->prices->create([
+            'product' => $productId,
+            'unit_amount' => $amount,
+            'currency' => $currency,
+            'recurring' => $plan->isLifetime() ? null : ['interval' => (string) ($plan->interval ?? 'month')],
+            'metadata' => [
+                'plan_id' => (string) $plan->id,
+                'plan_slug' => (string) $plan->slug,
+            ],
+        ]);
+
+        $plan->setStripePriceIdFor($currency, (string) $price->id);
+
+        return (string) $price->id;
     }
 
     /**
@@ -109,6 +187,27 @@ class StripeProductSync
             ->where('is_active', true)
             ->where('price_cents', '>', 0)
             ->each(fn (Plan $p) => $this->syncPlan($p));
+    }
+
+    /**
+     * Best-effort probe for the test->live key-switch footgun. True
+     * ONLY when Stripe definitively reports the price does not exist
+     * under the current key ("No such price"). Auth/network/any other
+     * error returns false — the probe must never turn a working
+     * checkout into a new failure; the real call downstream surfaces
+     * genuine problems.
+     */
+    private function priceMissing(string $priceId): bool
+    {
+        try {
+            $this->stripe->prices->retrieve($priceId);
+
+            return false;
+        } catch (InvalidRequestException $e) {
+            return str_contains($e->getMessage(), 'No such price');
+        } catch (\Throwable) {
+            return false;
+        }
     }
 
     /**

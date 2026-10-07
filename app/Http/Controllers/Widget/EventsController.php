@@ -3,13 +3,29 @@
 namespace App\Http\Controllers\Widget;
 
 use App\Models\Event;
+use App\Models\WidgetEvent;
+use App\Services\Widget\WidgetEventRecorder;
 use App\Services\Widget\WidgetJwt;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 
 class EventsController
 {
-    public function __construct(private WidgetJwt $jwt) {}
+    /**
+     * Client-reported event kinds that are reliability problems, mapped to
+     * the Widget Monitor type they bridge to. A `widget.stream_stalled` means
+     * the visitor's stream froze (no SSE for 35s, or the 120s ceiling) and
+     * the widget gave up — exactly the freeze symptom we want surfaced for an
+     * operator, even when the server-side turn looks fine.
+     */
+    private const BRIDGED_KINDS = [
+        'widget.stream_stalled' => WidgetEventRecorder::TYPE_CLIENT_STALLED,
+    ];
+
+    public function __construct(
+        private WidgetJwt $jwt,
+        private WidgetEventRecorder $widgetEvents,
+    ) {}
 
     public function __invoke(Request $request): JsonResponse
     {
@@ -41,18 +57,17 @@ class EventsController
                 'created_at' => now(),
             ]);
 
-            if ($event['kind'] === 'human_requested' && $conversationId) {
-                $conversation = \App\Models\Conversation::query()
-                    ->withoutWorkspaceScope()
-                    ->with('agent')
-                    ->find($conversationId);
-                
-                if ($conversation && $conversation->agent) {
-                    event(\App\Events\Conversations\HumanRequestedEvent::fromConversation(
-                        $conversation,
-                        (string) $conversation->agent->workspace_id
-                    ));
-                }
+            // Mirror reliability-relevant client signals into the monitor.
+            $bridgedType = self::BRIDGED_KINDS[$event['kind']] ?? null;
+            if ($bridgedType !== null) {
+                $this->widgetEvents->record(
+                    type: $bridgedType,
+                    severity: WidgetEvent::SEVERITY_WARNING,
+                    message: $event['kind'],
+                    context: is_array($event['payload'] ?? null) ? $event['payload'] : [],
+                    agentId: $agentId,
+                    conversationId: $conversationId,
+                );
             }
         }
 

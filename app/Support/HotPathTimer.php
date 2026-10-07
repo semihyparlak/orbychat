@@ -2,7 +2,9 @@
 
 namespace App\Support;
 
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
+use Throwable;
 
 /**
  * Records per-stage timings on the RAG hot path and emits one structured
@@ -32,6 +34,17 @@ use Illuminate\Support\Facades\Log;
  */
 class HotPathTimer
 {
+    /**
+     * Cache key holding the most recent turn timings as a ring buffer.
+     * Read by the super-admin "Hot path latency" dashboard so operators
+     * can see which stage is slow without grepping laravel.log.
+     */
+    public const RECENT_CACHE_KEY = 'hotpath:recent';
+
+    public const RECENT_MAX = 100;
+
+    private const RECENT_TTL_DAYS = 7;
+
     /** @var array<string, float> microtime_float for each mark */
     private array $marks = [];
 
@@ -76,6 +89,43 @@ class HotPathTimer
             'stages' => $stages,
             'extra' => $extra,
         ]);
+
+        $this->pushRecent($stages, $extra);
+    }
+
+    /**
+     * Append this turn to the dashboard ring buffer. Runs in the
+     * post-`done` side-effect zone (emit() is step 9 of the stream
+     * handler), so the visitor's time-to-first-token is unaffected.
+     * Failures are swallowed — observability must never break a turn.
+     *
+     * @param  array<string, int>  $stages
+     * @param  array<string, mixed>  $extra
+     */
+    private function pushRecent(array $stages, array $extra): void
+    {
+        try {
+            $recent = Cache::get(self::RECENT_CACHE_KEY, []);
+            if (! is_array($recent)) {
+                $recent = [];
+            }
+
+            array_unshift($recent, [
+                'at' => now()->toIso8601String(),
+                'conversation_id' => $this->conversationId,
+                'agent_id' => $this->agentId,
+                'stages' => $stages,
+                'extra' => $extra,
+            ]);
+
+            Cache::put(
+                self::RECENT_CACHE_KEY,
+                array_slice($recent, 0, self::RECENT_MAX),
+                now()->addDays(self::RECENT_TTL_DAYS),
+            );
+        } catch (Throwable) {
+            // Cache outage must not surface to the visitor.
+        }
     }
 
     /**

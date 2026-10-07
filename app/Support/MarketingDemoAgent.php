@@ -22,12 +22,30 @@ final class MarketingDemoAgent
     {
         $explicit = config('services.marketing.demo_agent_id');
         if (is_string($explicit) && $explicit !== '') {
-            return $explicit;
+            // Validate the explicit env-pinned id still resolves to a
+            // published agent. Operators commonly re-seed the demo
+            // agent (`orbychat:seed-demo-agent`) which mints a fresh
+            // uuid; the stale env value then makes /widget/init return
+            // 404 agent_not_found and the marketing widget sits silent.
+            // Falling through to auto-discovery when the explicit id
+            // is invalid means the widget heals itself after a re-seed
+            // without an operator restart. Buyer reported 2026-05-21.
+            $valid = Cache::remember(
+                'marketing.demo_agent_id.explicit_valid.'.$explicit,
+                now()->addMinutes(2),
+                fn () => Agent::query()->withoutGlobalScopes()
+                    ->where('id', $explicit)
+                    ->where('is_published', true)
+                    ->exists(),
+            );
+            if ($valid) {
+                return $explicit;
+            }
         }
 
         return Cache::remember('marketing.demo_agent_id', now()->addMinutes(5), function () {
             $workspace = Workspace::query()->withoutGlobalScopes()
-                ->where('slug', 'orbychat-demo')
+                ->whereIn('slug', ['orby-demo', 'orbychat-demo', 'orbychat-demo'])
                 ->first();
 
             if ($workspace === null) {

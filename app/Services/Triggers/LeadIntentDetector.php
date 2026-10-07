@@ -2,6 +2,7 @@
 
 namespace App\Services\Triggers;
 
+use App\Models\Agent;
 use App\Models\Conversation;
 use App\Models\Lead;
 use App\Models\Message;
@@ -65,8 +66,30 @@ class LeadIntentDetector
      */
     private const REPROMPT_COOLDOWN = 5;
 
+    /**
+     * Per-agent strategy override values. `engagement` is the legacy
+     * default. The other three exist because buyers told us the
+     * engagement gate is too patient for sales-focused agents (where
+     * even the first message is a buying signal) and too noisy for
+     * support agents (where they handle leads outside chat). See
+     * `lead_prompt_strategy` migration on the agents table.
+     */
+    public const STRATEGY_ENGAGEMENT = 'engagement';
+
+    public const STRATEGY_FIRST_TURN = 'first_turn';
+
+    public const STRATEGY_KEYWORD_ONLY = 'keyword_only';
+
+    public const STRATEGY_NEVER = 'never';
+
     public function shouldPrompt(Conversation $conversation, string $visitorMessage): bool
     {
+        $strategy = $this->resolveStrategy($conversation);
+
+        if ($strategy === self::STRATEGY_NEVER) {
+            return false;
+        }
+
         // Already gave us their info — never re-prompt for this
         // conversation. Lead capture is one-and-done per session.
         $hasLead = Lead::query()->withoutWorkspaceScope()
@@ -95,34 +118,32 @@ class LeadIntentDetector
             return false;
         }
 
-        $strategy = $conversation->agent->lead_trigger_strategy ?: 'engagement';
+        // First-turn strategy: prompt on the very first visitor message
+        // regardless of keyword or engagement. Customers who run
+        // sales-led agents (every visitor is a lead) want this.
+        if ($strategy === self::STRATEGY_FIRST_TURN
+            && $visitorTurns === 1
+            && $lastPromptedTurn === 0) {
+            $this->markPrompted($conversation->id, $visitorTurns);
 
-        if ($strategy === 'never') {
-            return false;
-        }
-
-        // Strategy: "first_message" — Prompt immediately after the first visitor turn.
-        if ($strategy === 'first_message') {
-            if ($visitorTurns === 1) {
-                $this->markPrompted($conversation->id, $visitorTurns);
-                return true;
-            }
-            return false;
+            return true;
         }
 
         // Fast path: high-intent keyword in the visitor's own message.
-        // Applies to both "engagement" and "keyword_only" strategies.
+        // Always runs unless the agent disabled it entirely.
         if ($this->matchesHighIntent($visitorMessage)) {
             $this->markPrompted($conversation->id, $visitorTurns);
 
             return true;
         }
 
-        if ($strategy === 'keyword_only') {
+        // Keyword-only: no engagement fallback. Customers who don't
+        // want surprise prompts after 3 turns pick this.
+        if ($strategy === self::STRATEGY_KEYWORD_ONLY) {
             return false;
         }
 
-        // Strategy: "engagement" (default) — enough turns deep, prompt once.
+        // Engagement path: enough turns deep, prompt once.
         if ($visitorTurns >= self::ENGAGEMENT_THRESHOLD && $lastPromptedTurn === 0) {
             $this->markPrompted($conversation->id, $visitorTurns);
 
@@ -130,6 +151,26 @@ class LeadIntentDetector
         }
 
         return false;
+    }
+
+    private function resolveStrategy(Conversation $conversation): string
+    {
+        $agent = $conversation->relationLoaded('agent')
+            ? $conversation->agent
+            : Agent::query()->withoutGlobalScopes()->find($conversation->agent_id);
+
+        $strategy = $agent?->lead_prompt_strategy;
+
+        if (! is_string($strategy) || $strategy === '') {
+            return self::STRATEGY_ENGAGEMENT;
+        }
+
+        return in_array($strategy, [
+            self::STRATEGY_ENGAGEMENT,
+            self::STRATEGY_FIRST_TURN,
+            self::STRATEGY_KEYWORD_ONLY,
+            self::STRATEGY_NEVER,
+        ], true) ? $strategy : self::STRATEGY_ENGAGEMENT;
     }
 
     private function cacheKey(string $conversationId): string

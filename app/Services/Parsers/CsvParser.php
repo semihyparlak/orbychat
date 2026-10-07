@@ -14,7 +14,7 @@ class CsvParser implements FileParser
 
     public function parse(string $bytes, string $filename): array
     {
-        $csv = Reader::createFromString($bytes);
+        $csv = Reader::fromString($bytes);
         $csv->setHeaderOffset(0);
 
         $segments = [];

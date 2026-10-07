@@ -42,11 +42,17 @@ class AppSetting extends Model
         'cloudflare_api_token' => 'encrypted',
         'openai_api_key' => 'encrypted',
         'openrouter_api_key' => 'encrypted',
+        'azure_foundry_api_key' => 'encrypted',
         'mail_password' => 'encrypted',
         'internal_queue_token' => 'encrypted',
         'marketing_home_content' => 'array',
+        'pricing_faqs' => 'array',
+        'pricing_matrix' => 'array',
+        'integrations_enabled' => 'array',
+        'integration_cards' => 'array',
         'privacy_policy_content' => 'array',
         'widget_defaults' => 'array',
+        'auth_aside_bullets' => 'array',
         'cron_worker_deployed_at' => 'datetime',
         'cron_worker_last_status_at' => 'datetime',
         'cron_worker_last_status' => 'array',
@@ -54,7 +60,34 @@ class AppSetting extends Model
         'paypal_enabled' => 'boolean',
         'razorpay_enabled' => 'boolean',
         'marketing_site_enabled' => 'boolean',
+        'marketing_widget_enabled' => 'boolean',
+        'marketing_theme' => 'string',
+        'require_email_verification' => 'boolean',
+        'byok_enabled_globally' => 'boolean',
+        'admin_daily_digest_enabled' => 'boolean',
+        'cloudflare_browser_rendering' => 'boolean',
+        'azure_foundry_enabled' => 'boolean',
     ];
+
+    public function getPitchbarBrandUrlAttribute(): ?string
+    {
+        return $this->attributes['pitchbar_brand_url'] ?? $this->attributes['orbychat_brand_url'] ?? null;
+    }
+
+    public function getPitchbarBrandLabelAttribute(): ?string
+    {
+        return $this->attributes['pitchbar_brand_label'] ?? $this->attributes['orbychat_brand_label'] ?? null;
+    }
+
+    public function getOrbychatBrandUrlAttribute(): ?string
+    {
+        return $this->attributes['orbychat_brand_url'] ?? $this->attributes['pitchbar_brand_url'] ?? null;
+    }
+
+    public function getOrbychatBrandLabelAttribute(): ?string
+    {
+        return $this->attributes['orbychat_brand_label'] ?? $this->attributes['pitchbar_brand_label'] ?? null;
+    }
 
     /**
      * Resolve the single row, creating it on first access.

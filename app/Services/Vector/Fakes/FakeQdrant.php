@@ -83,6 +83,11 @@ class FakeQdrant implements QdrantClient
         $this->store[$name] ??= [];
     }
 
+    public function dropCollection(string $name): void
+    {
+        unset($this->store[$name]);
+    }
+
     public function dump(string $collection): array
     {
         return $this->store[$collection] ?? [];

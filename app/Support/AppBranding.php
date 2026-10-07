@@ -35,6 +35,12 @@ class AppBranding
         $headerLogoUrl = self::assetUrl(self::resolveAssetPath($settings, 'header_logo_path', 'branding.header_logo_path'));
         $footerLogoUrl = self::assetUrl(self::resolveAssetPath($settings, 'footer_logo_path', 'branding.footer_logo_path'));
         $dashboardLogoUrl = self::assetUrl(self::resolveAssetPath($settings, 'dashboard_logo_path', 'branding.dashboard_logo_path'));
+        // Dark-mode variants — optional, only persisted when the
+        // operator uploads them in Settings → Branding. Surfaces drive
+        // their dark <img> off these via Tailwind dark: utilities.
+        $headerLogoDarkUrl = self::assetUrl(self::resolveAssetPath($settings, 'header_logo_dark_path', 'branding.header_logo_dark_path'));
+        $footerLogoDarkUrl = self::assetUrl(self::resolveAssetPath($settings, 'footer_logo_dark_path', 'branding.footer_logo_dark_path'));
+        $dashboardLogoDarkUrl = self::assetUrl(self::resolveAssetPath($settings, 'dashboard_logo_dark_path', 'branding.dashboard_logo_dark_path'));
         $faviconUrl = self::assetUrl(self::resolveAssetPath($settings, 'favicon_path', 'branding.favicon_path'));
 
         return [
@@ -42,16 +48,42 @@ class AppBranding
             'header_logo_url' => $headerLogoUrl,
             'footer_logo_url' => $footerLogoUrl,
             'dashboard_logo_url' => $dashboardLogoUrl,
+            'header_logo_dark_url' => $headerLogoDarkUrl,
+            'footer_logo_dark_url' => $footerLogoDarkUrl,
+            'dashboard_logo_dark_url' => $dashboardLogoDarkUrl,
             'favicon_url' => $faviconUrl,
             'header_brand_display' => self::resolveDisplayMode($settings?->header_brand_display, $headerLogoUrl !== null),
             'footer_brand_display' => self::resolveDisplayMode($settings?->footer_brand_display, ($footerLogoUrl ?? $headerLogoUrl) !== null),
             'dashboard_brand_display' => self::resolveDisplayMode($settings?->dashboard_brand_display, $dashboardLogoUrl !== null),
-            'widget_brand_url' => self::resolveString($settings?->orbychat_brand_url, (string) config('branding.url')),
-            'widget_brand_label' => self::resolveString($settings?->orbychat_brand_label, (string) config('branding.label')),
+            'widget_brand_url' => str_ireplace(['orby.chat', 'orby.chat', 'orbychat'], ['orby.chat', 'orby.chat', 'orbychat'], self::resolveString($settings?->orbychat_brand_url, (string) config('branding.url'))),
+            'widget_brand_label' => str_ireplace('OrbyChat', 'OrbyChat', self::resolveString($settings?->orbychat_brand_label, (string) config('branding.label'))),
             // Public marketing-site kill switch (Settings → Branding).
             // Default true so existing installs are unaffected.
             'marketing_site_enabled' => $settings?->marketing_site_enabled ?? true,
+            // Admin-editable side-panel copy for auth pages (Aurora /
+            // Prism themes). NULL on any field = theme falls back to
+            // its bundled default so first-install installs stay
+            // pre-styled.
+            'auth_aside_eyebrow' => self::nullableString($settings?->auth_aside_eyebrow),
+            'auth_aside_heading' => self::nullableString($settings?->auth_aside_heading),
+            'auth_aside_lede' => self::nullableString($settings?->auth_aside_lede),
+            'auth_aside_bullets' => is_array($settings?->auth_aside_bullets ?? null)
+                ? array_values(array_filter(
+                    array_map(static fn ($v) => is_string($v) ? trim($v) : '', $settings->auth_aside_bullets),
+                    static fn (string $v): bool => $v !== '',
+                ))
+                : null,
         ];
+    }
+
+    private static function nullableString(mixed $value): ?string
+    {
+        if (! is_string($value)) {
+            return null;
+        }
+        $trimmed = trim($value);
+
+        return $trimmed === '' ? null : $trimmed;
     }
 
     public static function assetUrl(mixed $path): ?string

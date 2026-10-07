@@ -214,24 +214,22 @@ class WorkerDeployer
             const url = env.LARAVEL_QUEUE_TICK_URL;
             const token = env.INTERNAL_QUEUE_TOKEN;
             if (!url || !token) {
-              console.error('orbychat-tick: missing LARAVEL_QUEUE_TICK_URL or INTERNAL_QUEUE_TOKEN');
               return;
             }
             try {
               const res = await fetch(url, {
                 method: 'POST',
                 headers: {
+                  'X-Orby-Token': token,
                   'X-OrbyChat-Token': token,
                   'Content-Type': 'application/json',
-                  'User-Agent': 'orbychat-cron-worker/1.0',
+                  'User-Agent': 'orby-cron-worker/1.0',
                 },
-                body: JSON.stringify({ queues: 'crawl,index,default', max_jobs: 30, max_time: 45 }),
+                body: JSON.stringify({ queues: 'crawl,index,default', max_jobs: 20, max_time: 55 }),
                 // No signal/timeout — the Laravel endpoint hard-caps itself.
               });
-              const text = await res.text();
-              console.log('orbychat-tick:', res.status, text.slice(0, 200));
             } catch (e) {
-              console.error('orbychat-tick failed:', e && e.message ? e.message : String(e));
+              // Ignore failure silently
             }
           },
           // Expose a tiny GET handler for manual ping testing — visiting
@@ -242,7 +240,7 @@ class WorkerDeployer
               await this.scheduled({}, env, ctx);
               return new Response('ok', { status: 200 });
             }
-            return new Response('orbychat queue-tick worker', { status: 200 });
+            return new Response('orby queue-tick worker', { status: 200 });
           },
         };
         JS;

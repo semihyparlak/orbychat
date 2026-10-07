@@ -67,11 +67,26 @@ return [
         'chat_model' => env('OPENAI_CHAT_MODEL', 'gpt-4o-mini'),
         'embed_model' => env('OPENAI_EMBED_MODEL', 'text-embedding-3-small'),
     ],
+    'openrouter' => [
+        'key' => env('OPENROUTER_API_KEY'),
+        'chat_model' => env('OPENROUTER_CHAT_MODEL', 'meta-llama/llama-3.3-70b-instruct:free'),
+    ],
+    'azure_foundry' => [
+        'enabled' => (bool) env('AZURE_FOUNDRY_ENABLED', false),
+        'endpoint' => env('AZURE_FOUNDRY_ENDPOINT', ''),
+        'api_key' => env('AZURE_FOUNDRY_API_KEY', ''),
+        'deployment' => env('AZURE_FOUNDRY_DEPLOYMENT', 'gpt-4o'),
+        'embed_model' => env('AZURE_FOUNDRY_EMBED_MODEL', 'text-embedding-3-small'),
+        'api_version' => env('AZURE_FOUNDRY_API_VERSION', '2024-06-01'),
+    ],
 
     // Vector store provider — VECTOR_PROVIDER=cloudflare|qdrant. Default
     // logic mirrors the LLM provider above.
     'vector' => [
         'provider' => env('VECTOR_PROVIDER', ''),
+        'circuit_threshold' => (int) env('VECTOR_CIRCUIT_THRESHOLD', 5),
+        'circuit_cooldown' => (int) env('VECTOR_CIRCUIT_COOLDOWN', 60),
+        'circuit_window' => (int) env('VECTOR_CIRCUIT_WINDOW', 60),
     ],
     'qdrant' => [
         'url' => env('QDRANT_URL'),
@@ -86,7 +101,7 @@ return [
     // Vector collection name. Resolved per-provider so jobs/services don't have to branch.
     'vector_collection' => env('VECTOR_PROVIDER') === 'qdrant'
         ? env('QDRANT_COLLECTION', 'orbychat_chunks')
-        : env('CLOUDFLARE_VECTORIZE_INDEX', 'orbychat-chunks'),
+        : (env('CLOUDFLARE_VECTORIZE_INDEX') ?: env('VECTORIZE_INDEX', 'orbychat-chunks')),
 
     // Crawler. CF Browser Rendering preferred when CF keys present;
     // falls back to Browserless, then plain HTTP (free).
@@ -96,15 +111,106 @@ return [
     ],
 
     'crawl' => [
-        'max_pages_per_source' => (int) env('CRAWL_MAX_PAGES_PER_SOURCE', 25),
+        // 500 default. Operators on very large catalogues raise via env.
+        'max_pages_per_source' => (int) env('CRAWL_MAX_PAGES_PER_SOURCE', 500),
         'page_dispatch_delay_seconds' => (int) env('CRAWL_PAGE_DISPATCH_DELAY', 2),
+        // Crawler response cache. 0 = disabled; otherwise TTL in seconds.
+        'response_cache_ttl_seconds' => (int) env('CRAWL_RESPONSE_CACHE_TTL', 300),
     ],
 
     // Default similarity threshold for new agents. Cloudflare bge-base-en-v1.5
-    // scores typically peak around 0.7”"0.85 for in-domain matches; OpenAI
+    // scores typically peak around 0.7–0.85 for in-domain matches; OpenAI
     // text-embedding-3-small peaks higher. Tune via RAG_CONFIDENCE_THRESHOLD.
     'rag' => [
         'confidence_threshold' => (float) env('RAG_CONFIDENCE_THRESHOLD', env('LLM_PROVIDER') === 'openai' ? 0.78 : 0.5),
+        // ANN candidate multiplier for the reranker: it sees topK * fan_out
+        // candidates and keeps topK. Higher = better precision, slower rerank
+        // (cross-encoder time scales with candidate count).
+        'rerank_fan_out' => (int) env('RAG_RERANK_FAN_OUT', 3),
+        // Reranker HTTP timeout (seconds). Kept SHORT so a slow reranker
+        // fails fast to the recall-oriented ANN order instead of stalling
+        // the whole turn — an 8s reranker stall tips a turn past the
+        // widget's own connection timeout, and the visitor sees a generic
+        // "something went wrong" instead of a slightly-less-ranked answer.
+        'rerank_timeout_seconds' => (float) env('RAG_RERANK_TIMEOUT_SECONDS', 3.0),
+        // Adaptive rerank skip — when ANN already returned >= topK candidates
+        // that ALL score >= skip_score, the cross-encoder round-trip
+        // (500-1,200ms on Workers AI) only reorders chunks that every one
+        // goes into the prompt anyway. Skip it and keep ANN order. Default
+        // OFF: enabling is an operator decision after baselining with
+        // perf:hotpath. skip_score is an ANN cosine and scales with the
+        // embedding model, hence the provider-conditional default.
+        'rerank_skip' => (bool) env('RAG_RERANK_SKIP', false),
+        'rerank_skip_score' => (float) env('RAG_RERANK_SKIP_SCORE', env('LLM_PROVIDER') === 'openai' ? 0.80 : 0.68),
+
+        // LLM query rewriting (condensed standalone question). When a
+        // visitor's message is context-dependent (a follow-up / bare
+        // fragment), a small fast LLM rewrites it — using the recent
+        // conversation — into ONE self-contained search query BEFORE
+        // retrieval, so pronouns/ellipsis/language quirks stop poisoning
+        // the embedding. Self-contained questions skip the LLM entirely
+        // (the gate), keeping the fast path fast. A slow/failed rewrite
+        // falls back to the deterministic heuristic (RetrievalQueryBuilder)
+        // — the stream never blocks on it.
+        //
+        // OFF by default: this adds a round-trip to the hot path, so it is
+        // an explicit per-install opt-in (RAG_QUERY_REWRITE=true). Tests and
+        // unconfigured installs keep the exact heuristic behavior.
+        'query_rewrite' => [
+            'enabled' => (bool) env('RAG_QUERY_REWRITE', false),
+            // Empty = use the provider's default chat model. Set a small
+            // fast model (e.g. @cf/meta/llama-3.1-8b-instruct) to shave
+            // latency off the rewrite.
+            'model' => env('RAG_QUERY_REWRITE_MODEL', ''),
+            // Hard ceiling on the rewrite round-trip. On timeout we fall
+            // back to the heuristic — better a slightly-worse query than a
+            // stalled stream.
+            'timeout_ms' => (int) env('RAG_QUERY_REWRITE_TIMEOUT_MS', 2500),
+            // How many recent turns of context the rewriter sees.
+            'max_history_turns' => (int) env('RAG_QUERY_REWRITE_HISTORY_TURNS', 6),
+        ],
+    ],
+
+    // Fast router — skips the pre-stream tool-check completion (1-3
+    // full non-streaming LLM calls) when a visitor turn carries no
+    // tool intent. Default OFF: enabling is an explicit operator
+    // decision after baselining with `perf:hotpath`. Thresholds are
+    // cosine similarity against per-tool exemplar centroids and scale
+    // with the embedding model.
+    //
+    // bge defaults calibrated in production (2026-06-10):
+    // bge-base scores UNRELATED sentence pairs 0.70-0.71 against the
+    // tool centroids (anisotropy — its cosine floor is high), so any
+    // bar below ~0.75 routes every turn to the tool loop. 0.85 sits
+    // above the measured noise; the keyword gate remains the primary
+    // tool-intent path either way.
+    'fast_router' => [
+        'enabled' => (bool) env('FAST_ROUTER_ENABLED', false),
+        'threshold' => (float) env('FAST_ROUTER_TOOL_THRESHOLD', env('LLM_PROVIDER') === 'openai' ? 0.45 : 0.85),
+        'thresholds' => [
+            // Escalation stays the easiest tool to trigger — a missed
+            // escalation strands a frustrated visitor, a false positive
+            // merely re-adds the legacy tool-check completion.
+            'escalate_to_human' => (float) env('FAST_ROUTER_ESCALATE_THRESHOLD', env('LLM_PROVIDER') === 'openai' ? 0.40 : 0.82),
+        ],
+    ],
+
+    // Stripe Tax (automatic tax calculation). Opt-in per install: the
+    // operator must FIRST activate Stripe Tax in their Stripe dashboard
+    // (origin address + tax registrations) — enabling this flag without
+    // that makes every checkout fail. New subscriptions / invoices /
+    // checkout sessions only; never retroactive.
+    'stripe_tax' => [
+        'enabled' => (bool) env('CASHIER_AUTO_TAX', false),
+    ],
+
+    // Per-turn behind-the-scenes traces for the super-admin conversation
+    // debugger (route decision, retrieval summary, tool hops, errors).
+    // Written by a queued job after the SSE stream closes — never on the
+    // hot path. Pruned daily by `turn-traces:prune`.
+    'turn_traces' => [
+        'enabled' => (bool) env('TURN_TRACES_ENABLED', true),
+        'retention_days' => (int) env('TURN_TRACE_RETENTION_DAYS', 14),
     ],
 
     // Cloudflare — one bill: chat, embeddings, vector DB, browser rendering, R2.
@@ -112,14 +218,31 @@ return [
         'account_id' => env('CLOUDFLARE_ACCOUNT_ID'),
         'api_token' => env('CLOUDFLARE_API_TOKEN'),
         'chat_model' => env('CLOUDFLARE_CHAT_MODEL', '@cf/meta/llama-3.3-70b-instruct-fp8-fast'),
+        // Secondary Cloudflare CHAT model the failover decorator switches
+        // to when the primary is slow / cold-starting / 5xx. Lets a
+        // single-Cloudflare install self-heal model→model without a second
+        // provider key. Default is a fast, GA, broadly-available model so a
+        // slow 70B primary degrades to an 8B answer instead of erroring.
+        // Set empty to disable the in-provider fallback.
+        'chat_model_fallback' => env('CLOUDFLARE_CHAT_MODEL_FALLBACK', '@cf/meta/llama-3.1-8b-instruct'),
         'embed_model' => env('CLOUDFLARE_EMBED_MODEL', '@cf/baai/bge-base-en-v1.5'),
         'ai_gateway_url' => env('CLOUDFLARE_AI_GATEWAY_URL'),
-        'vectorize_index' => env('CLOUDFLARE_VECTORIZE_INDEX', 'orbychat-chunks'),
+        'vectorize_index' => (env('CLOUDFLARE_VECTORIZE_INDEX') ?: env('VECTORIZE_INDEX', 'orbychat-chunks')),
         'browser_rendering' => env('CLOUDFLARE_BROWSER_RENDERING', true),
+        // Daily cap on Browser Rendering calls. <= 0 = unlimited.
+        'browser_daily_limit' => (int) env('CLOUDFLARE_BROWSER_DAILY_LIMIT', 0),
+        // Workers AI vision OCR fallback. Used by CloudflareVisionCrawler
+        // as the last-resort tier when every HTML-based tier (plain HTTP,
+        // CF /markdown, CF /content) produced text below the chain
+        // threshold. Costs Workers AI Neurons, so the daily cap exists
+        // independently of CLOUDFLARE_BROWSER_DAILY_LIMIT.
+        'vision_model' => env('CLOUDFLARE_VISION_MODEL', '@cf/meta/llama-3.2-11b-vision-instruct'),
+        'vision_daily_limit' => (int) env('CLOUDFLARE_VISION_DAILY_LIMIT', 0),
     ],
 
     'widget' => [
-        'jwt_secret' => env('WIDGET_JWT_SECRET', 'change-me-in-production'),
+        // Fall back to APP_KEY so the secret is never a published constant.
+        'jwt_secret' => env('WIDGET_JWT_SECRET') ?: env('APP_KEY', ''),
         'jwt_ttl_minutes' => env('WIDGET_JWT_TTL_MINUTES', 60),
     ],
 

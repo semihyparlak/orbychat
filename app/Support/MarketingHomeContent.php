@@ -21,23 +21,77 @@ class MarketingHomeContent
             $payload = AppSetting::query()->find(AppSetting::SINGLETON_ID)?->marketing_home_content;
         }
 
-        $resolved = self::mergeNodes(self::defaults(), is_array($payload) ? $payload : []);
+        if (is_array($payload)) {
+            array_walk_recursive($payload, static function (&$item) {
+                if (is_string($item)) {
+                    $item = str_ireplace(
+                        ['OrbyChat Inc', 'OrbyChat AI', 'OrbyChat', 'orbychat.dev', 'orbychat.ai'],
+                        ['OrbyChat Inc', 'OrbyChat AI', 'OrbyChat', 'orby.chat', 'orby.chat'],
+                        $item,
+                    );
+                }
+            });
+        }
 
-        // Ensure "Solutions" is always in the header if it's missing from the DB overrides
-        $hasSolutions = false;
-        foreach ($resolved['nav_items'] as $item) {
-            if (isset($item['href']) && str_contains($item['href'], '/solutions')) {
-                $hasSolutions = true;
-                break;
+        return self::mergeNodes(self::defaults(), is_array($payload) ? $payload : []);
+    }
+
+    /**
+     * When the operator points the marketing site at an external docs
+     * domain (header.docs_external_url, e.g. https://blengidocs.com),
+     * repoint every built-in `/documentation…` link — the header
+     * Documentation link and all footer doc links — at it, preserving the
+     * sub-path so `/documentation/quickstart` → `{base}/quickstart`. This
+     * is the one-field "use my own docs site" switch; leave it blank to
+     * keep the built-in `/documentation`.
+     *
+     * Applied at RENDER time (controllers / MarketingShellContent), NOT
+     * inside resolve() — resolve()'s output is what the admin editor
+     * persists, so baking external links there would make clearing the
+     * setting unable to restore the built-in `/documentation` defaults.
+     *
+     * @param  array<string, mixed>  $content
+     * @return array<string, mixed>
+     */
+    public static function applyExternalDocsUrl(array $content): array
+    {
+        $base = rtrim(trim((string) ($content['header']['docs_external_url'] ?? '')), '/');
+
+        if ($base === '') {
+            return $content;
+        }
+
+        // resources_href is keyed `resources_href`, not `href`, so handle
+        // it explicitly; everything else (nav_items, footer links) uses an
+        // `href` key picked up by the recursive walk.
+        $resourcesHref = (string) ($content['header']['resources_href'] ?? '');
+
+        if (str_starts_with($resourcesHref, '/documentation')) {
+            $content['header']['resources_href'] = $base.substr($resourcesHref, strlen('/documentation'));
+        }
+
+        return self::rewriteDocHrefs($content, $base);
+    }
+
+    /**
+     * Recursively rewrite any `href` value that starts with
+     * `/documentation` onto the external docs base.
+     */
+    private static function rewriteDocHrefs(mixed $node, string $base): mixed
+    {
+        if (! is_array($node)) {
+            return $node;
+        }
+
+        foreach ($node as $key => $value) {
+            if ($key === 'href' && is_string($value) && str_starts_with($value, '/documentation')) {
+                $node[$key] = $base.substr($value, strlen('/documentation'));
+            } else {
+                $node[$key] = self::rewriteDocHrefs($value, $base);
             }
         }
 
-        if (! $hasSolutions) {
-            // Insert after Product (index 1)
-            array_splice($resolved['nav_items'], 1, 0, [['label' => __('Solutions'), 'href' => '/solutions']]);
-        }
-
-        return $resolved;
+        return $node;
     }
 
     public static function editorValue(?array $content = null): string
@@ -56,366 +110,352 @@ class MarketingHomeContent
         return [
             'brand_name' => 'OrbyChat',
             'nav_items' => [
-                ['label' => __('Product'), 'href' => '/'],
-                ['label' => __('Solutions'), 'href' => '/solutions'],
-                ['label' => __('Pricing'), 'href' => '/pricing'],
-                ['label' => __('How it works'), 'href' => '/how-it-works'],
-                ['label' => __('Integrations'), 'href' => '/integrations'],
+                // "Home" not "Product": the logo + this link both go to /,
+                // so labelling it "Product" while pointing at the homepage
+                // confused operators (buyer report). No standalone product
+                // page exists, so the honest label is Home.
+                ['label' => 'Home', 'href' => '/'],
+                ['label' => 'Pricing', 'href' => '/pricing'],
+                ['label' => 'How it works', 'href' => '/how-it-works'],
+                ['label' => 'Integrations', 'href' => '/integrations'],
             ],
             'header' => [
-                'resources_label' => '',
-                'resources_href' => '',
-                'primary_button_label' => __('Book demo'),
+                'resources_label' => 'Documentation',
+                'resources_href' => '/documentation',
+                // Point the marketing site's doc links at an external docs
+                // domain (e.g. https://yourdocs.com). Blank = use the
+                // built-in /documentation. Applied by applyExternalDocsUrl().
+                'docs_external_url' => '',
+                // Show the Documentation link in the public nav. Off by
+                // default (self-hosted buyers usually don't want it); demo
+                // installs always show it regardless of this flag.
+                'show_documentation' => false,
+                'primary_button_label' => 'Book demo',
                 'primary_button_href' => '__primary__',
             ],
             'hero' => [
-                'badge' => __('AI sales assistant for high-intent pages'),
-                'line_one' => __('Turn every'),
-                'accent' => __('high-intent'),
-                'line_two_suffix' => __('page'),
-                'line_three_prefix' => __('into a'),
-                'line_three_highlight' => __('sales'),
-                'line_four_highlight' => __('conversation.'),
-                'description' => __('OrbyChat answers questions, qualifies visitors, and guides them to the next step, so your team closes more, faster.'),
-                'site_test_label' => __('Test it on your site'),
+                'badge' => 'AI sales assistant for high-intent pages',
+                'line_one' => 'Turn every',
+                'accent' => 'high-intent',
+                'line_two_suffix' => 'page',
+                'line_three_prefix' => 'into a',
+                'line_three_highlight' => 'sales',
+                'line_four_highlight' => 'conversation.',
+                'description' => 'OrbyChat answers questions, qualifies visitors, and guides them to the next step, so your team closes more, faster.',
+                'site_test_label' => 'Test it on your site',
                 'site_test_placeholder' => 'https://yourwebsite.com/pricing',
-                'site_test_button_label' => __('Try it'),
-                'site_test_helper' => __('No credit card required. Instant preview.'),
-                'live_demo_notice' => __('Live demo agent is active on this page.'),
+                'site_test_button_label' => 'Try it',
+                'site_test_helper' => 'No credit card required. Instant preview.',
+                'live_demo_notice' => 'Live demo agent is active on this page.',
             ],
             'chat_preview' => [
-                'title' => __('OrbyChat AI'),
-                'badge' => __('Live'),
-                'question' => __('How does your pricing work for teams of 20?'),
-                'answer' => __('For teams that need scale, the Pro plan is the best fit. It includes advanced analytics, priority support, and up to 5,000 conversations.'),
-                'plan_badge' => __('RECOMMENDED'),
-                'plan_name' => __('Pro'),
-                'plan_price' => '$99',
-                'plan_interval' => __('/month'),
-                'plan_note' => __('Billed monthly for up to 5,000 conversations'),
+                'title' => 'OrbyChat AI',
+                'badge' => 'Live',
+                'question' => 'How does your pricing work for teams of 20?',
+                'answer' => 'For teams of 20, the Pro plan is the best fit. It includes advanced analytics, priority support, and unlimited pages.',
+                'plan_badge' => 'RECOMMENDED',
+                'plan_name' => 'Pro',
+                'plan_price' => '$199',
+                'plan_interval' => '/month',
+                'plan_note' => 'Billed monthly for up to 20 users',
                 'plan_features' => [
-                    __('Advanced analytics'),
-                    __('Priority support'),
-                    __('Unlimited pages'),
+                    'Advanced analytics',
+                    'Priority support',
+                    'Unlimited pages',
                 ],
-                'plan_button_label' => __('Start Pro plan'),
-                'typing_label' => __('AI is typing...'),
-                'powered_by_prefix' => __('Powered by'),
+                'plan_button_label' => 'Start Pro plan',
+                'typing_label' => 'AI is typing...',
+                'powered_by_prefix' => 'Powered by',
             ],
             'stats' => [
                 [
                     'icon' => 'BarChart3',
                     'value' => '53%',
-                    'label' => __('Lift in conversions on high-intent pages'),
+                    'label' => 'Lift in conversions on high-intent pages',
                 ],
                 [
                     'icon' => 'Zap',
                     'value' => '<1s',
-                    'label' => __('Average response time'),
+                    'label' => 'Average response time',
                 ],
                 [
                     'icon' => 'Clock3',
                     'value' => '5 min',
-                    'label' => __('Setup time to go live'),
+                    'label' => 'Setup time to go live',
                 ],
                 [
                     'icon' => 'Target',
                     'value' => '24/7',
-                    'label' => __('Always-on conversations that never sleep'),
+                    'label' => 'Always-on conversations that never sleep',
                 ],
             ],
             'video' => [
-                'badge' => __('Video walkthrough'),
-                'title' => __('Watch OrbyChat handle a real buyer question.'),
-                'description' => __('This short walkthrough shows how the assistant appears on a high-intent page, answers with the right context, and guides the visitor to the best next step.'),
+                'badge' => 'Video walkthrough',
+                'title' => 'Watch OrbyChat handle a real buyer question.',
+                'description' => 'This short walkthrough shows how the assistant appears on a high-intent page, answers with the right context, and guides the visitor to the best next step.',
                 'bullets' => [
-                    __('Trigger the assistant on pricing and product pages'),
-                    __('Answer product questions with relevant context'),
-                    __('Route qualified visitors to the right CTA'),
+                    'Trigger the assistant on pricing and product pages',
+                    'Answer product questions with relevant context',
+                    'Route qualified visitors to the right CTA',
                 ],
-                'duration_label' => __('2 min walkthrough'),
-                'tag_label' => __('Pricing page demo'),
-                'scene_label' => __('Scene 01'),
-                'card_title' => __('Pricing page questions, answered in context.'),
+                'duration_label' => '2 min walkthrough',
+                'tag_label' => 'Pricing page demo',
+                'scene_label' => 'Scene 01',
+                'card_title' => 'Pricing page questions, answered in context.',
                 'timecode' => '02:18',
                 'chips' => [
-                    __('Greeting trigger'),
-                    __('Plan recommendation'),
-                    __('CTA handoff'),
+                    'Greeting trigger',
+                    'Plan recommendation',
+                    'CTA handoff',
                 ],
-                'footer_title' => __('See how the assistant greets, answers, qualifies, and routes in one flow.'),
-                'footer_description' => __('Open the walkthrough for the full product story before you scroll into the rest of the page.'),
-                'button_label' => __('Watch video'),
+                'footer_title' => 'See how the assistant greets, answers, qualifies, and routes in one flow.',
+                'footer_description' => 'Open the walkthrough for the full product story before you scroll into the rest of the page.',
+                'button_label' => 'Watch video',
+                // Vimeo / YouTube URL or any other embed; rendered inline in
+                // a modal lightbox by the home page video card.
                 'href' => 'https://vimeo.com/1190236104',
             ],
             'where_it_fits' => [
-                'badge' => __('Where it fits'),
-                'title' => __('Built for the pages that drive the right conversations.'),
+                'badge' => 'Where it fits',
+                'title' => 'Built for the pages that drive the right conversations.',
                 'cards' => [
                     [
                         'icon' => 'Tags',
-                        'title' => __('Pricing pages'),
-                        'description' => __('Answer pricing questions, compare plans, and convert more visitors.'),
+                        'title' => 'Pricing pages',
+                        'description' => 'Answer pricing questions, compare plans, and convert more visitors.',
                     ],
                     [
                         'icon' => 'Box',
-                        'title' => __('Product pages'),
-                        'description' => __('Explain features, highlight benefits, and move buyers forward.'),
+                        'title' => 'Product pages',
+                        'description' => 'Explain features, highlight benefits, and move buyers forward.',
                     ],
                     [
                         'icon' => 'BookOpen',
-                        'title' => __('Docs & help pages'),
-                        'description' => __('Resolve questions, point to answers, and reduce support load.'),
+                        'title' => 'Docs & help pages',
+                        'description' => 'Resolve questions, point to answers, and reduce support load.',
                     ],
                 ],
             ],
             'feature_grid' => [
-                'badge' => __('Powerful under the hood'),
-                'title' => __('Simple for visitors. Fully controlled by your team.'),
+                'badge' => 'Powerful under the hood',
+                'title' => 'Simple for visitors. Fully controlled by your team.',
                 'cards' => [
                     [
                         'icon' => 'Tags',
-                        'title' => __('Behavior triggers'),
-                        'description' => __('Awake the right message at the right moment based on visitor intent and page context.'),
+                        'title' => 'Behavior triggers',
+                        'description' => 'Awake the right message at the right moment based on visitor intent and page context.',
                     ],
                     [
                         'icon' => 'Zap',
-                        'title' => __('Streaming answers'),
-                        'description' => __('Real-time, cited answers sourced from your content for instant clarity.'),
+                        'title' => 'Streaming answers',
+                        'description' => 'Real-time, cited answers sourced from your content for instant clarity.',
                     ],
                     [
                         'icon' => 'Target',
-                        'title' => __('Smart CTAs'),
-                        'description' => __('AI recommends the next best step and routes visitors to the right action.'),
+                        'title' => 'Smart CTAs',
+                        'description' => 'AI recommends the next best step and routes visitors to the right action.',
                     ],
                     [
                         'icon' => 'CircleCheck',
-                        'title' => __('Auto-trains on your content'),
-                        'description' => __('Continuously learns from your docs, pages, and updates with no manual retraining.'),
+                        'title' => 'Auto-trains on your content',
+                        'description' => 'Continuously learns from your docs, pages, and updates with no manual retraining.',
                     ],
                     [
                         'icon' => 'ClipboardList',
-                        'title' => __('Lead capture & routing'),
-                        'description' => __('Qualify leads, capture details, and route to the right person or system.'),
+                        'title' => 'Lead capture & routing',
+                        'description' => 'Qualify leads, capture details, and route to the right person or system.',
                     ],
                     [
                         'icon' => 'TrendingUp',
-                        'title' => __('Self-improving insights'),
-                        'description' => __('Surface what visitors ask, where they drop off, and how to improve conversions.'),
-                    ],
-                ],
-            ],
-            'rich_features' => [
-                'badge' => __('Next-gen capabilities'),
-                'title' => __('Go beyond basic chat with rich interactions.'),
-                'items' => [
-                    [
-                        'id' => 'appointments',
-                        'icon' => 'Clock3',
-                        'title' => __('Appointment Scheduling'),
-                        'description' => __('Directly book meetings and demos within the chat thread. AI handles the availability check and confirms the slot.'),
-                        'feature_label' => __('Book a slot'),
-                    ],
-                    [
-                        'id' => 'ecommerce',
-                        'icon' => 'ShoppingCart',
-                        'title' => __('E-commerce Integration'),
-                        'description' => __('Connect your Shopify or Ikas store. The AI can recommend products, check inventory, and guide visitors to checkout.'),
-                        'feature_label' => __('Sell products'),
-                    ],
-                    [
-                        'id' => 'leads',
-                        'icon' => 'ClipboardList',
-                        'title' => __('Smart Lead Capture'),
-                        'description' => __('Dynamic forms that appear exactly when the AI detects high intent. Fully customizable fields and instant routing.'),
-                        'feature_label' => __('High-intent forms'),
+                        'title' => 'Self-improving insights',
+                        'description' => 'Surface what visitors ask, where they drop off, and how to improve conversions.',
                     ],
                 ],
             ],
             'control' => [
-                'badge' => __('You are in control'),
-                'title' => __('Tune the AI to match your messaging and goals.'),
-                'description' => __('OrbyChat adapts to your voice, your offer, and your go-to-market motion, so every conversation feels on-brand and on-strategy.'),
+                'badge' => 'You are in control',
+                'title' => 'Tune the AI to match your messaging and goals.',
+                'description' => 'OrbyChat adapts to your voice, your offer, and your go-to-market motion, so every conversation feels on-brand and on-strategy.',
                 'callouts' => [
                     [
                         'icon' => 'ShieldCheck',
-                        'title' => __('Enterprise ready'),
-                        'description' => __('SSO, SOC 2, GDPR compliant, and built with security in mind.'),
+                        'title' => 'Enterprise ready',
+                        'description' => 'SSO, SOC 2, GDPR compliant, and built with security in mind.',
                     ],
                     [
                         'icon' => 'LockKeyhole',
-                        'title' => __('Your data stays yours'),
-                        'description' => __('We use your content to answer, never to train public models.'),
+                        'title' => 'Your data stays yours',
+                        'description' => 'We use your content to answer, never to train public models.',
                     ],
                 ],
-                'settings_card_title' => __('Conversation settings'),
+                'settings_card_title' => 'Conversation settings',
                 'settings_rows' => [
                     [
-                        'label' => __('Trigger rule'),
-                        'hint' => __('When should OrbyChat appear?'),
-                        'value' => __('High intent - Pricing page'),
+                        'label' => 'Trigger rule',
+                        'hint' => 'When should OrbyChat appear?',
+                        'value' => 'High intent - Pricing page',
                     ],
                     [
-                        'label' => __('Answer style'),
-                        'hint' => __('How should OrbyChat respond?'),
-                        'value' => __('Helpful, concise, and solution-oriented'),
+                        'label' => 'Answer style',
+                        'hint' => 'How should OrbyChat respond?',
+                        'value' => 'Helpful, concise, and solution-oriented',
                     ],
                     [
-                        'label' => __('CTA routing'),
-                        'hint' => __('Where should visitors go next?'),
-                        'value' => __('Route to Plan selection page'),
+                        'label' => 'CTA routing',
+                        'hint' => 'Where should visitors go next?',
+                        'value' => 'Route to Plan selection page',
                     ],
                     [
-                        'label' => __('Follow-up signal'),
-                        'hint' => __('When should OrbyChat re-engage?'),
-                        'value' => __('After 30s of inactivity'),
+                        'label' => 'Follow-up signal',
+                        'hint' => 'When should OrbyChat re-engage?',
+                        'value' => 'After 30s of inactivity',
                     ],
                 ],
-                'cancel_label' => __('Cancel'),
-                'save_button_label' => __('Save changes'),
+                'cancel_label' => 'Cancel',
+                'save_button_label' => 'Save changes',
             ],
             'steps' => [
-                'badge' => __('From paste to live'),
-                'title' => __('From paste to live in 3 simple steps.'),
+                'badge' => 'From paste to live',
+                'title' => 'From paste to live in 3 simple steps.',
                 'items' => [
                     [
                         'icon' => 'ClipboardList',
-                        'title' => __('Paste your content'),
-                        'description' => __('Add URLs, docs, or copy. OrbyChat learns your content automatically.'),
+                        'title' => 'Paste your content',
+                        'description' => 'Add URLs, docs, or copy. OrbyChat learns your content automatically.',
                     ],
                     [
                         'icon' => 'Sparkles',
-                        'title' => __('Configure & customize'),
-                        'description' => __('Set triggers, tone, CTAs, and routing in minutes.'),
+                        'title' => 'Configure & customize',
+                        'description' => 'Set triggers, tone, CTAs, and routing in minutes.',
                     ],
                     [
                         'icon' => 'CircleCheck',
-                        'title' => __('Go live & optimize'),
-                        'description' => __('Embed with one line of code and start improving conversations.'),
+                        'title' => 'Go live & optimize',
+                        'description' => 'Embed with one line of code and start improving conversations.',
                     ],
                 ],
             ],
             'insights' => [
-                'badge' => __('Insights that drive growth'),
-                'chart_title' => __('Every conversation becomes a signal.'),
-                'chart_description' => __('See what visitors ask, what moves them forward, and where you can improve.'),
-                'metric_label' => __('Conversations'),
+                'badge' => 'Insights that drive growth',
+                'chart_title' => 'Every conversation becomes a signal.',
+                'chart_description' => 'See what visitors ask, what moves them forward, and where you can improve.',
+                'metric_label' => 'Conversations',
                 'metric_value' => '12,842',
-                'metric_trend' => __('+28% vs last 30 days'),
+                'metric_trend' => '+28% vs last 30 days',
                 'chart_points' => [45, 53, 62, 80, 77, 91, 87, 103, 119, 111, 127, 141, 135, 160, 154, 178],
-                'chart_labels' => [__('Apr 19'), __('Apr 26'), __('May 3'), __('May 10'), __('May 17')],
+                'chart_labels' => ['Apr 19', 'Apr 26', 'May 3', 'May 10', 'May 17'],
                 'cards' => [
                     [
                         'icon' => 'Sparkles',
-                        'title' => __('Curated answers'),
-                        'description' => __('Top visitor questions and your best performing answers.'),
+                        'title' => 'Curated answers',
+                        'description' => 'Top visitor questions and your best performing answers.',
                     ],
                     [
                         'icon' => 'ClipboardList',
-                        'title' => __('Experiments'),
-                        'description' => __('Test messages and CTAs to see what drives more conversions.'),
+                        'title' => 'Experiments',
+                        'description' => 'Test messages and CTAs to see what drives more conversions.',
                     ],
                     [
                         'icon' => 'ShieldCheck',
-                        'title' => __('Lead context'),
-                        'description' => __('See where leads came from and what they were interested in.'),
+                        'title' => 'Lead context',
+                        'description' => 'See where leads came from and what they were interested in.',
                     ],
                 ],
             ],
             'testimonials' => [
-                'badge' => __('What teams are saying'),
-                'title' => __('Trusted by teams who care about every visitor'),
-                'kicker' => __('From founders, growth leads, and customer-experience teams running OrbyChat on their busiest pages.'),
+                'badge' => 'What teams are saying',
+                'title' => 'Trusted by teams who care about every visitor',
+                'kicker' => 'From founders, growth leads, and customer-experience teams running OrbyChat on their busiest pages.',
                 'items' => [
                     [
                         'name' => 'Maya R.',
-                        'role' => __('Head of Growth'),
+                        'role' => 'Head of Growth',
                         'company' => 'Northpath SaaS',
-                        'quote' => __('We replaced a static FAQ widget with OrbyChat and lifted demo bookings 38% in the first month. The keyword-triggered handoff to our SDR Slack is the part our team loves the most.'),
+                        'quote' => 'We replaced a static FAQ widget with OrbyChat and lifted demo bookings 38% in the first month. The keyword-triggered handoff to our SDR Slack is the part our team loves the most.',
                     ],
                     [
                         'name' => 'Daniel K.',
-                        'role' => __('Founder'),
+                        'role' => 'Founder',
                         'company' => 'Hopper Print Co.',
-                        'quote' => __('Buyers ask for shipping ETAs in a dozen ways. OrbyChat answers from our actual store policies, not a hallucinated guess. Refund requests are down because the bot answers them correctly the first time.'),
+                        'quote' => 'Buyers ask for shipping ETAs in a dozen ways. OrbyChat answers from our actual store policies, not a hallucinated guess. Refund requests are down because the bot answers them correctly the first time.',
                     ],
                     [
                         'name' => 'Priya S.',
-                        'role' => __('Customer Experience Lead'),
+                        'role' => 'Customer Experience Lead',
                         'company' => 'Loom Logistics',
-                        'quote' => __('The pre-chat lead gate is what closed the deal for us — every conversation comes with name + email up front, so the inbox is qualified before a human touches it.'),
+                        'quote' => 'The pre-chat lead gate is what closed the deal for us — every conversation comes with name + email up front, so the inbox is qualified before a human touches it.',
                     ],
                     [
                         'name' => 'Alex T.',
-                        'role' => __('CTO'),
+                        'role' => 'CTO',
                         'company' => 'Ledgerstack',
-                        'quote' => __('I evaluated five chat tools. OrbyChat was the only one we could self-host on our own Cloudflare account in under an hour, with the data never leaving our infra. The widget is also tiny — 18 KB gzipped, you can feel it.'),
+                        'quote' => 'I evaluated five chat tools. OrbyChat was the only one we could self-host on our own Cloudflare account in under an hour, with the data never leaving our infra. The widget is also tiny — 18 KB gzipped, you can feel it.',
                     ],
                     [
                         'name' => 'Sara N.',
-                        'role' => __('Marketing Manager'),
+                        'role' => 'Marketing Manager',
                         'company' => 'Crestform Studio',
-                        'quote' => __('The visual workflow editor felt familiar from day one — anyone who has used a chatbot builder before can pick it up. The branching means our refund flow actually qualifies the right leads, not just everyone with the word "refund".'),
+                        'quote' => 'The visual workflow editor felt familiar from day one — anyone who has used a chatbot builder before can pick it up. The branching means our refund flow actually qualifies the right leads, not just everyone with the word "refund".',
                     ],
                 ],
             ],
             'faq' => [
-                'badge' => __('Frequently asked'),
-                'title' => __('Everything you need to know'),
-                'kicker' => __('Have a question we missed? Open the assistant on this page and ask it — that\'s the bot answering from our own docs.'),
+                'badge' => 'Frequently asked',
+                'title' => 'Everything you need to know',
+                'kicker' => 'Have a question we missed? Open the assistant on this page and ask it — that\'s the bot answering from our own docs.',
                 'items' => [
                     [
-                        'question' => __('How does OrbyChat know what to say to my visitors?'),
-                        'answer' => __('It reads your website, docs, and any extra knowledge sources you upload. Every visitor turn runs retrieval-augmented generation — the bot grounds every reply in chunks pulled from your real content, with citations the visitor can click. There is no LLM hallucination on facts you have not provided.'),
+                        'question' => 'How does OrbyChat know what to say to my visitors?',
+                        'answer' => 'It reads your website, docs, and any extra knowledge sources you upload. Every visitor turn runs retrieval-augmented generation — the bot grounds every reply in chunks pulled from your real content, with citations the visitor can click. There is no LLM hallucination on facts you have not provided.',
                     ],
                     [
-                        'question' => __('Will it slow down my page?'),
-                        'answer' => __('The widget bundle is roughly 18 KB gzipped and lazy-loads on first visitor interaction. Your page paint is unaffected. The chat itself streams the first token within a second; the latency budget is enforced by the engineering team and regression-tested.'),
+                        'question' => 'Will it slow down my page?',
+                        'answer' => 'The widget bundle is roughly 18 KB gzipped and lazy-loads on first visitor interaction. Your page paint is unaffected. The chat itself streams the first token within a second; the latency budget is enforced by the engineering team and regression-tested.',
                     ],
                     [
-                        'question' => __('Is it hard to install OrbyChat on my site?'),
-                        'answer' => __('Absolutely not! Just copy a single line of code and paste it into your website. It works seamlessly with WordPress, Wix, Shopify, or custom sites in seconds.'),
+                        'question' => 'Can I self-host on my own infrastructure?',
+                        'answer' => 'Yes. OrbyChat runs on Laravel + MySQL/Postgres + Redis. We support Cloudflare Workers AI for the LLM and embeddings, OpenAI / OpenRouter as alternatives, and Cloudflare Vectorize or Qdrant for the vector store. The Extended License lets you run the platform as a paid SaaS for your own customers.',
                     ],
                     [
-                        'question' => __('Can I use OrbyChat on multiple websites?'),
-                        'answer' => __('Yes! You can install the widget on any number of domains. You can manage multiple agents from a single dashboard and track performance across all your sites.'),
+                        'question' => 'How does multi-tenancy work?',
+                        'answer' => 'Every workspace is fully isolated. Models with a workspace scope (agents, conversations, leads, sources) enforce a global query scope keyed off the authenticated user OR the widget JWT — there is no path where workspace A can read workspace B\'s data, and the multi-tenancy regression test is part of CI.',
                     ],
                     [
-                        'question' => __('Can I customise the widget look?'),
-                        'answer' => __('The Customize page on every agent lets you set the primary + accent colours, corner radius, position (centered bar, bottom-right bubble, bottom-left), launcher label, persona name, and starter prompts. The pre-chat lead gate, the lead form fields, and the per-page restricted-paths list are all per-agent toggles too.'),
+                        'question' => 'Can I customise the widget look?',
+                        'answer' => 'The Customize page on every agent lets you set the primary + accent colours, corner radius, position (centered bar, bottom-right bubble, bottom-left), launcher label, persona name, and starter prompts. The pre-chat lead gate, the lead form fields, and the per-page restricted-paths list are all per-agent toggles too.',
                     ],
                     [
-                        'question' => __('How are leads captured?'),
-                        'answer' => __('Two ways. Either the LLM raises a lead-capture signal mid-conversation (e.g. when the visitor expresses buying intent), in which case an inline form drops into the chat thread; or you turn on the pre-chat name+email gate and the visitor identifies themselves before chatting. Each agent can also have a custom lead-form schema with text/email/tel/textarea/select/checkbox fields.'),
+                        'question' => 'How are leads captured?',
+                        'answer' => 'Two ways. Either the LLM raises a lead-capture signal mid-conversation (e.g. when the visitor expresses buying intent), in which case an inline form drops into the chat thread; or you turn on the pre-chat name+email gate and the visitor identifies themselves before chatting. Each agent can also have a custom lead-form schema with text/email/tel/textarea/select/checkbox fields.',
                     ],
                     [
-                        'question' => __('Does it handle multiple languages?'),
-                        'answer' => __('Yes. Each agent picks a default language; visitors are auto-detected from their Accept-Language header. The supported set in the Customize panel is en, es, fr, de, pt, ja, ar, zh — adding more is a single-line edit in the form-request validator.'),
+                        'question' => 'Does it handle multiple languages?',
+                        'answer' => 'Yes. Each agent picks a default language; visitors are auto-detected from their Accept-Language header. The supported set in the Customize panel is en, es, fr, de, pt, ja, ar, zh — adding more is a single-line edit in the form-request validator.',
                     ],
                     [
-                        'question' => __('Can the bot hand off to a human?'),
-                        'answer' => __('Yes. Workflows can be set up to detect handoff intent (a keyword, an explicit "talk to a human" message, or a sentiment-routing rule) and surface a Live Agent panel inside the widget. Workspace members on the dashboard see the conversation in real time and can take over.'),
+                        'question' => 'Can the bot hand off to a human?',
+                        'answer' => 'Yes. Workflows can be set up to detect handoff intent (a keyword, an explicit "talk to a human" message, or a sentiment-routing rule) and surface a Live Agent panel inside the widget. Workspace members on the dashboard see the conversation in real time and can take over.',
                     ],
                     [
-                        'question' => __('What about GDPR / data privacy?'),
-                        'answer' => __('Visitor email + name only enter the database when they fill in a lead form. The chat transcript itself is workspace-scoped and deletable. Buyers running OrbyChat in regulated industries get the full benefit of self-hosting: the data never leaves your AWS / GCP / Hetzner / bare-metal box.'),
+                        'question' => 'What about GDPR / data privacy?',
+                        'answer' => 'Visitor email + name only enter the database when they fill in a lead form. The chat transcript itself is workspace-scoped and deletable. Buyers running OrbyChat in regulated industries get the full benefit of self-hosting: the data never leaves your AWS / GCP / Hetzner / bare-metal box.',
                     ],
                     [
-                        'question' => __('Do I need a credit card to try it?'),
-                        'answer' => __('No. The free tier lets you create one agent, ingest a few sources, and have up to 50 conversations. Paid plans unlock additional agents, higher conversation caps, and white-label removal of the Powered by footer.'),
+                        'question' => 'Do I need a credit card to try it?',
+                        'answer' => 'No. The free tier lets you create one agent, ingest a few sources, and have real conversations. Paid plans unlock additional agents, higher conversation caps, and white-label removal of the Powered by footer.',
                     ],
                 ],
             ],
             'final_cta' => [
-                'title' => __('Ready to turn more traffic into pipeline?'),
-                'description' => __('Join leading teams who use OrbyChat to have more conversations, close more deals, and grow faster.'),
-                'primary_button_label' => __('Book a demo'),
+                'title' => 'Ready to turn more traffic into pipeline?',
+                'description' => 'Join leading teams who use OrbyChat to have more conversations, close more deals, and grow faster.',
+                'primary_button_label' => 'Book a demo',
                 'primary_button_href' => '__primary__',
-                'secondary_button_label' => __('Try live demo'),
+                'secondary_button_label' => 'Try live demo',
                 'secondary_button_href' => '__primary__',
             ],
             'footer' => [
-                'brand_description' => __('AI sales assistant for high-intent pages that drives real results.'),
+                'brand_description' => 'AI sales assistant for high-intent pages that drives real results.',
                 'socials' => [
                     ['label' => 'in', 'href' => '#'],
                     ['label' => 'X', 'href' => '#'],
@@ -423,23 +463,41 @@ class MarketingHomeContent
                 ],
                 'groups' => [
                     [
-                        'title' => __('Product'),
+                        'title' => 'Product',
                         'links' => [
-                            ['label' => __('Solutions'), 'href' => '/solutions'],
-                            ['label' => __('How it works'), 'href' => '/how-it-works'],
-                            ['label' => __('Pricing'), 'href' => '/pricing'],
-                            ['label' => __('Integrations'), 'href' => '/integrations'],
+                            ['label' => 'How it works', 'href' => '/how-it-works'],
+                            ['label' => 'Pricing', 'href' => '/pricing'],
+                            ['label' => 'Integrations', 'href' => '/integrations'],
+                            ['label' => 'Widget API', 'href' => '/documentation/widget-api'],
+                        ],
+                    ],
+                    [
+                        'title' => 'Build',
+                        'links' => [
+                            ['label' => 'Quickstart', 'href' => '/documentation/quickstart'],
+                            ['label' => 'Embed the widget', 'href' => '/documentation/embed'],
+                            ['label' => 'Knowledge sources', 'href' => '/documentation/knowledge'],
+                            ['label' => 'Behavior rules', 'href' => '/documentation/behavior-rules'],
+                        ],
+                    ],
+                    [
+                        'title' => 'Resources',
+                        'links' => [
+                            ['label' => 'Documentation', 'href' => '/documentation'],
+                            ['label' => 'Architecture', 'href' => '/documentation/architecture'],
+                            ['label' => 'Allowed origins', 'href' => '/documentation/allowed-origins'],
+                            ['label' => 'Outgoing webhooks', 'href' => '/documentation/webhooks'],
                         ],
                     ],
                 ],
-                'legal_title' => __('Legal'),
+                'legal_title' => 'Legal',
                 'legal_links' => [
-                    ['label' => __('Privacy'), 'href' => '/privacy'],
-                    ['label' => __('Terms'), 'href' => '/terms'],
-                    ['label' => __('Security'), 'href' => '/privacy'],
-                    ['label' => __('Trust center'), 'href' => '/terms'],
+                    ['label' => 'Privacy', 'href' => '/privacy'],
+                    ['label' => 'Terms', 'href' => '/terms'],
+                    ['label' => 'Security', 'href' => '/privacy'],
+                    ['label' => 'Trust center', 'href' => '/terms'],
                 ],
-                'copyright' => __('Copyright 2026 OrbyChat. All rights reserved.'),
+                'copyright' => 'Copyright 2026 OrbyChat Inc. All rights reserved.',
             ],
         ];
     }

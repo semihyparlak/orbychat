@@ -2,6 +2,7 @@
 
 namespace App\Support;
 
+use App\Services\I18n\TranslationLoader;
 use Illuminate\Support\Facades\URL;
 
 /**
@@ -20,7 +21,7 @@ class SeoMeta
 {
     private const ROUTE_DEFAULTS = [
         'home' => [
-            'title' => 'OrbyChat — AI-powered Sales Assistant for Your Website',
+            'title' => '{brand} — AI sales assistant for high-intent pages',
             'description' => 'Turn every high-intent page into a sales conversation. The {brand} chat widget answers from your real content, captures leads, and hands off to humans on demand. Self-hostable, multi-tenant, white-labelable.',
             'path' => '/',
         ],
@@ -66,16 +67,6 @@ class SeoMeta
             'description' => '{page_summary}',
             'path' => '/documentation',
         ],
-        'marketing.solutions' => [
-            'title' => 'AI Sales Assistant for {page_title} — {brand}',
-            'description' => '{page_summary}',
-            'path' => '/solutions',
-        ],
-        'marketing.solutions.index' => [
-            'title' => 'Industry Solutions — {brand}',
-            'description' => 'Explore how {brand} AI sales assistants can be tailored for your specific industry, from Real Estate to SaaS and beyond.',
-            'path' => '/solutions',
-        ],
     ];
 
     /**
@@ -99,13 +90,27 @@ class SeoMeta
             'page_summary' => (string) ($overrides['page_summary'] ?? 'Documentation'),
         ];
 
+        // SEO title/description are translatable. Resolve the TEMPLATE (with
+        // the {brand} token still in place) through the override-aware loader
+        // at the active locale, THEN interpolate — so an operator's locale
+        // override renders, while {brand} stays a placeholder (protected
+        // during machine translation). When the locale has no override (e.g.
+        // English, or multilingual disabled) get() returns null and the
+        // shipped template is used unchanged. Mirrors {@see MarketingTranslator}.
+        $locale = app()->getLocale();
+        $loader = app(TranslationLoader::class);
+
+        $titleTemplate = (string) ($overrides['title'] ?? $defaults['title'] ?? $brand);
         $title = self::interpolate(
-            (string) __($overrides['title'] ?? $defaults['title'] ?? $brand),
+            $loader->get($locale, $titleTemplate) ?? $titleTemplate,
             $tokens,
         );
 
+        $descriptionTemplate = (string) ($overrides['description'] ?? $defaults['description'] ?? '');
         $description = self::interpolate(
-            (string) __($overrides['description'] ?? $defaults['description'] ?? ''),
+            $descriptionTemplate === ''
+                ? ''
+                : ($loader->get($locale, $descriptionTemplate) ?? $descriptionTemplate),
             $tokens,
         );
 
@@ -141,6 +146,39 @@ class SeoMeta
     public static function defaults(array $overrides = []): array
     {
         return self::for('home', $overrides);
+    }
+
+    /**
+     * Every translatable SEO meta string — the per-route title and
+     * description templates. Surfaced in the Translation Manager so
+     * operators can localise them; {@see for()} resolves each against the
+     * locale's overrides at render time. Templates that are nothing but a
+     * placeholder (e.g. "{page_summary}") carry no copy and are skipped.
+     *
+     * @return array<int, string>
+     */
+    public static function translatableStrings(): array
+    {
+        $strings = [];
+
+        foreach (self::ROUTE_DEFAULTS as $route) {
+            foreach (['title', 'description'] as $field) {
+                $value = trim((string) ($route[$field] ?? ''));
+                if ($value === '') {
+                    continue;
+                }
+
+                // Skip values with no copy once {placeholders} are removed.
+                $stripped = trim((string) preg_replace('/\{[a-z_]+\}/i', '', $value));
+                if (preg_match('/\p{L}/u', $stripped) !== 1) {
+                    continue;
+                }
+
+                $strings[] = $value;
+            }
+        }
+
+        return array_values(array_unique($strings));
     }
 
     private static function canonicalUrl(string $path): string

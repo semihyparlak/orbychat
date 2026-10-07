@@ -32,7 +32,7 @@ class CloudflareReranker implements Reranker
     public static function default(string $accountId, string $apiToken, ?Guzzle $http = null): self
     {
         return new self(
-            $http ?? new Guzzle(['timeout' => 8]),
+            $http ?? new Guzzle(['timeout' => (float) config('services.rag.rerank_timeout_seconds', 3.0)]),
             $accountId,
             $apiToken,
         );

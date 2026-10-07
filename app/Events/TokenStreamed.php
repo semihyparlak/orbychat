@@ -2,6 +2,7 @@
 
 namespace App\Events;
 
+use App\Events\Concerns\BroadcastsWhenConfigured;
 use Illuminate\Broadcasting\InteractsWithSockets;
 use Illuminate\Broadcasting\PrivateChannel;
 use Illuminate\Contracts\Broadcasting\ShouldBroadcastNow;
@@ -10,7 +11,7 @@ use Illuminate\Queue\SerializesModels;
 
 class TokenStreamed implements ShouldBroadcastNow
 {
-    use Dispatchable, InteractsWithSockets, SerializesModels;
+    use BroadcastsWhenConfigured, Dispatchable, InteractsWithSockets, SerializesModels;
 
     public function __construct(
         public string $conversationId,

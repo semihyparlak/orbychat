@@ -2,10 +2,22 @@
 
 namespace App\Services\Crawl;
 
+use App\Providers\AppServiceProvider;
 use App\Services\Crawl\Contracts\Crawler;
 use GuzzleHttp\Client as Guzzle;
 use GuzzleHttp\Exception\RequestException;
 
+/**
+ * @deprecated 2026-06 Browserless was removed from the default
+ * crawl chain in {@see AppServiceProvider} when the
+ * Cloudflare /markdown + /content + Vision tiers were introduced —
+ * CF covers the same ground free (on the customer's existing
+ * Cloudflare bill) and Browserless added a paid third-party
+ * dependency for no additional capability. BROWSERLESS_* env vars
+ * stay readable so existing .env files don't error, but the chain
+ * no longer auto-registers this client. Callers that still want it
+ * can bind it manually in a custom service provider.
+ */
 class BrowserlessClient implements Crawler
 {
     public function __construct(
@@ -29,7 +41,7 @@ class BrowserlessClient implements Crawler
         $endpoint = rtrim((string) config('services.browserless.url', 'https://chrome.browserless.io'), '/');
 
         try {
-            $response = $this->http->post($endpoint."/content?token={$this->token}", [
+            $response = $this->http->post($endpoint.'/content?token='.$this->token, [
                 'json' => [
                     'url' => $url,
                     'waitFor' => $opts['waitFor'] ?? 'domcontentloaded',
@@ -37,7 +49,11 @@ class BrowserlessClient implements Crawler
                 'http_errors' => false,
             ]);
         } catch (RequestException $e) {
-            throw new \RuntimeException("Browserless fetch failed: {$e->getMessage()}", previous: $e);
+            // Sanitise — Guzzle includes the request URI (with ?token=…) in transport errors.
+            throw new \RuntimeException(
+                'Browserless fetch failed: '.$this->sanitiseMessage($e->getMessage()),
+                previous: $e,
+            );
         }
 
         $code = $response->getStatusCode();
@@ -49,5 +65,18 @@ class BrowserlessClient implements Crawler
         }
 
         return (string) $response->getBody();
+    }
+
+    private function sanitiseMessage(string $message): string
+    {
+        if ($this->token === '') {
+            return $message;
+        }
+
+        return str_replace(
+            ['token='.$this->token, $this->token],
+            ['token=[REDACTED]', '[REDACTED]'],
+            $message,
+        );
     }
 }

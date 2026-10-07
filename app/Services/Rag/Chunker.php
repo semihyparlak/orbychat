@@ -32,10 +32,6 @@ class Chunker
             return [];
         }
 
-        if ($this->looksLikeExtractedPageCopy($text)) {
-            return $this->chunkExtractedPageCopy($text, $targetTokens);
-        }
-
         $targetChars = max(200, $targetTokens * 4);
         $overlapChars = max(0, $overlapTokens * 4);
 
@@ -53,146 +49,6 @@ class Chunker
         }
 
         return $this->applyOverlap($chunks, $overlapChars);
-    }
-
-    /**
-     * HTML/Inertia extraction gives us many small semantic fields separated
-     * by paragraph breaks. Preserve those field boundaries instead of adding
-     * trailing overlap, which makes previews look like one section bleeds into
-     * another ("pricing que" -> "drop off...").
-     *
-     * @return array<int, string>
-     */
-    private function chunkExtractedPageCopy(string $text, int $targetTokens): array
-    {
-        $singleChunkPreferred = $targetTokens >= 2000;
-        $targetChars = $singleChunkPreferred
-            ? max(200, $targetTokens * 4)
-            : 520;
-        $maxParagraphs = $singleChunkPreferred ? PHP_INT_MAX : 2;
-        $paragraphs = $this->dropDuplicateParagraphs($this->splitParagraphs($text));
-        $chunks = [];
-        $buffer = '';
-        $bufferParagraphs = 0;
-
-        foreach ($paragraphs as $paragraph) {
-            if (mb_strlen($paragraph) > $targetChars) {
-                if ($buffer !== '') {
-                    $chunks[] = $buffer;
-                    $buffer = '';
-                    $bufferParagraphs = 0;
-                }
-                foreach ($this->splitLongParagraph($paragraph, $targetChars) as $piece) {
-                    $chunks[] = $piece;
-                }
-
-                continue;
-            }
-
-            if ($buffer === '') {
-                $buffer = $paragraph;
-                $bufferParagraphs = 1;
-            } elseif ($bufferParagraphs < $maxParagraphs && mb_strlen($buffer) + 2 + mb_strlen($paragraph) <= $targetChars) {
-                $buffer .= "\n\n".$paragraph;
-                $bufferParagraphs++;
-            } else {
-                $chunks[] = $buffer;
-                $buffer = $paragraph;
-                $bufferParagraphs = 1;
-            }
-        }
-
-        if ($buffer !== '') {
-            $chunks[] = $buffer;
-        }
-
-        return array_values(array_filter(array_map('trim', $chunks), fn ($chunk) => $chunk !== ''));
-    }
-
-    /**
-     * @param  array<int, string>  $paragraphs
-     * @return array<int, string>
-     */
-    private function dropDuplicateParagraphs(array $paragraphs): array
-    {
-        $accepted = [];
-        $fingerprints = [];
-
-        foreach ($paragraphs as $paragraph) {
-            $fingerprint = $this->paragraphFingerprint($paragraph);
-            if ($fingerprint === '') {
-                continue;
-            }
-
-            $isDuplicate = false;
-            foreach ($fingerprints as $existing) {
-                if ($fingerprint === $existing) {
-                    $isDuplicate = true;
-                    break;
-                }
-
-                $shorter = mb_strlen($fingerprint) <= mb_strlen($existing) ? $fingerprint : $existing;
-                $longer = $shorter === $fingerprint ? $existing : $fingerprint;
-                if (mb_strlen($shorter) >= 60 && str_contains($longer, $shorter)) {
-                    $isDuplicate = true;
-                    break;
-                }
-            }
-
-            if ($isDuplicate) {
-                continue;
-            }
-
-            $accepted[] = $paragraph;
-            $fingerprints[] = $fingerprint;
-            foreach ($this->answerFingerprints($paragraph) as $answerFingerprint) {
-                $fingerprints[] = $answerFingerprint;
-            }
-        }
-
-        return $accepted;
-    }
-
-    /**
-     * @return array<int, string>
-     */
-    private function answerFingerprints(string $paragraph): array
-    {
-        if (! str_contains($paragraph, '?')) {
-            return [];
-        }
-
-        $afterQuestion = trim((string) preg_replace('/^.*?\?\s*/u', '', $paragraph));
-        $fingerprint = $this->paragraphFingerprint($afterQuestion);
-
-        return mb_strlen($fingerprint) >= 60 ? [$fingerprint] : [];
-    }
-
-    private function paragraphFingerprint(string $paragraph): string
-    {
-        $paragraph = mb_strtolower($paragraph);
-        $paragraph = preg_replace('/[^\p{L}\p{N}]+/u', ' ', $paragraph) ?? $paragraph;
-        $paragraph = preg_replace('/\s+/u', ' ', trim($paragraph)) ?? '';
-
-        return $paragraph;
-    }
-
-    private function looksLikeExtractedPageCopy(string $text): bool
-    {
-        $paragraphs = $this->splitParagraphs($text);
-        if (count($paragraphs) < 6) {
-            return false;
-        }
-
-        $short = 0;
-        foreach ($paragraphs as $paragraph) {
-            $len = mb_strlen($paragraph);
-            if ($len >= 24 && $len <= 420) {
-                $short++;
-            }
-        }
-
-        return $short >= 6;
     }
 
     /**
@@ -321,50 +177,14 @@ class Chunker
     {
         $out = [];
         $len = mb_strlen($text);
-        $i = 0;
-
-        while ($i < $len) {
-            $take = min($size, $len - $i);
-            $piece = mb_substr($text, $i, $take);
-
-            if ($i + $take < $len) {
-                $boundary = $this->lastBoundaryOffset($piece);
-                if ($boundary > (int) floor($size * 0.55)) {
-                    $piece = mb_substr($piece, 0, $boundary);
-                    $take = $boundary;
-                }
-            }
-
-            $piece = trim($piece);
+        for ($i = 0; $i < $len; $i += $size) {
+            $piece = trim(mb_substr($text, $i, $size));
             if ($piece !== '') {
                 $out[] = $piece;
             }
-
-            $i += max(1, $take);
         }
 
         return $out;
-    }
-
-    private function lastBoundaryOffset(string $text): int
-    {
-        $candidates = [
-            mb_strrpos($text, "\n\n"),
-            mb_strrpos($text, '. '),
-            mb_strrpos($text, '? '),
-            mb_strrpos($text, '! '),
-            mb_strrpos($text, '; '),
-            mb_strrpos($text, ', '),
-            mb_strrpos($text, ' '),
-        ];
-
-        foreach ($candidates as $pos) {
-            if ($pos !== false) {
-                return $pos + 1;
-            }
-        }
-
-        return 0;
     }
 
     /**

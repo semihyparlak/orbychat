@@ -2,7 +2,6 @@
 
 namespace App\Services\Crawl;
 
-use App\Support\CrawlDebugLog;
 use fivefilters\Readability\Configuration;
 use fivefilters\Readability\Readability;
 
@@ -34,6 +33,14 @@ class ReadabilityExtractor
             return ['title' => null, 'text' => ''];
         }
 
+        // XXE defense: libxml2 ≥ 2.9.0 (bundled with every supported PHP
+        // version, and required by our composer.json) disables external
+        // entity loading by default, so untrusted HTML cannot pull
+        // file://, http://, or php:// payloads through DOCTYPE. We
+        // keep error-buffering on so Readability's internal warnings
+        // don't bleed into the response.
+        $previousInternalErrors = libxml_use_internal_errors(true);
+
         try {
             $config = new Configuration([
                 'OriginalURL' => '',
@@ -57,29 +64,12 @@ class ReadabilityExtractor
             $text = trim(html_entity_decode(strip_tags($contentHtml), ENT_QUOTES | ENT_HTML5));
             $text = preg_replace('/\s+/u', ' ', $text) ?? $text;
 
-            $fallback = $this->fallback->extract($html);
-            CrawlDebugLog::write('ReadabilityExtractor compared extractors.', [
-                'readability_text_length' => mb_strlen($text),
-                'fallback_text_length' => mb_strlen($fallback['text']),
-                'readability_preview' => CrawlDebugLog::preview($text, 400),
-                'fallback_preview' => CrawlDebugLog::preview($fallback['text'], 400),
-                'has_data_page' => str_contains($html, 'data-page='),
-            ]);
-
-            // For Inertia/SPA pages, HtmlExtractor can read the structured
-            // hydration payload and skip demo widgets/chrome by JSON branch.
-            // Readability only sees the rendered DOM, so it often includes
-            // fake chat cards, pricing demos, and CTA text. Prefer the
-            // structured extractor once it found real content.
-            if (str_contains($html, 'data-page=') && mb_strlen($fallback['text']) > 250) {
-                return $fallback;
-            }
-
-            // If Readability extracted very little, or the fallback found
-            // materially more text (common for Inertia/SPA hydration payloads
-            // and product pages), prefer the fallback.
-            if (mb_strlen($text) < 200 || mb_strlen($fallback['text']) > mb_strlen($text) * 2) {
-                return $fallback;
+            // If Readability extracted very little (often happens on pages
+            // that aren't article-shaped), fall back. The legacy extractor
+            // is better at e-commerce / product pages where there's no
+            // single "main article" but lots of useful spec text.
+            if (mb_strlen($text) < 200) {
+                return $this->fallback->extract($html);
             }
 
             return ['title' => $title, 'text' => $text];
@@ -87,6 +77,8 @@ class ReadabilityExtractor
             // Readability throws on malformed HTML / pages without a clear
             // article body. Fall through to our regex extractor.
             return $this->fallback->extract($html);
+        } finally {
+            libxml_use_internal_errors($previousInternalErrors);
         }
     }
 }

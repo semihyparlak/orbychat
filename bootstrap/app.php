@@ -52,8 +52,12 @@ return Application::configure(basePath: dirname(__DIR__))
                 return null;
             }
 
-            return \Inertia\Inertia::render('errors/404')
-                ->toResponse($request)
-                ->setStatusCode(404);
+            try {
+                return \Inertia\Inertia::render('errors/404')
+                    ->toResponse($request)
+                    ->setStatusCode(404);
+            } catch (\Throwable) {
+                return response('Not Found', 404);
+            }
         });
     })->create();

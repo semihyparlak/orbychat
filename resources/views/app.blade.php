@@ -105,9 +105,9 @@
         </style>
 
         <script>
-            window.__PITCHBAR_SITE_TITLE__ = @json($siteTitle);
-            window.__PITCHBAR_DEFAULT_FAVICON_URL__ = @json($initialFavicon);
-            window.__PITCHBAR_DEFAULT_TOUCH_ICON_URL__ = @json($initialTouchIcon);
+            window.__ORBYCHAT_SITE_TITLE__ = @json($siteTitle);
+            window.__ORBYCHAT_DEFAULT_FAVICON_URL__ = @json($initialFavicon);
+            window.__ORBYCHAT_DEFAULT_TOUCH_ICON_URL__ = @json($initialTouchIcon);
 
             /**
              * Critical fix for "ReferenceError: __ is not defined" (#112).

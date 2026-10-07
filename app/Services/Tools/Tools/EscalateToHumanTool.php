@@ -3,7 +3,9 @@
 namespace App\Services\Tools\Tools;
 
 use App\Models\Agent;
+use App\Services\Tools\Contracts\HasIntentSignals;
 use App\Services\Tools\Contracts\Tool;
+use App\Support\HumanPhrases;
 
 /**
  * Hands the conversation off to a human operator. Universal — every
@@ -15,7 +17,7 @@ use App\Services\Tools\Contracts\Tool;
  * claim of the conversation by a human happens via the existing
  * ConversationTakeoverController flow.
  */
-class EscalateToHumanTool implements Tool
+class EscalateToHumanTool implements HasIntentSignals, Tool
 {
     public function name(): string
     {
@@ -24,7 +26,14 @@ class EscalateToHumanTool implements Tool
 
     public function description(): string
     {
-        return 'Offer the visitor an option to connect with a human support agent. Use this when the visitor asks for a human, when their issue clearly cannot be resolved via the knowledge base, or when sentiment is negative and frustration is escalating.';
+        // Buyer report 2026-05-18 (Lithuanian customer): small Workers
+        // AI models call this tool on almost every turn, so the
+        // "Connect me with a human" button showed up on every reply.
+        // Tightened scope to ONLY explicit, in-message human requests
+        // — the broader sentiment / unresolved-issue clauses
+        // encouraged over-eager invocation. Server also suppresses
+        // duplicate emissions in MessageStreamController::runToolLoop.
+        return 'Offer the visitor an option to connect with a human support agent. Call this tool ONLY when the visitor explicitly asks for a human in their current message (phrases like "talk to a human", "speak to an agent", "connect me to support"). Do NOT call it when answering general product / pricing / feature questions, when low-confidence answers are produced, or based on inferred sentiment alone.';
     }
 
     public function capability(): string
@@ -46,7 +55,7 @@ class EscalateToHumanTool implements Tool
         ];
     }
 
-    public function execute(array $args, Agent $agent): array
+    public function execute(array $args, Agent $agent, array $context = []): array
     {
         $reason = (string) ($args['reason'] ?? 'Visitor requested a human.');
 
@@ -62,6 +71,29 @@ class EscalateToHumanTool implements Tool
                     'reason' => $reason,
                 ],
             ],
+        ];
+    }
+
+    /**
+     * Fast-router signals. Keywords reuse the shared HumanPhrases list
+     * so the router and the upstream HumanIntentDetector shortcut stay
+     * in lock-step.
+     *
+     * @return list<string>
+     */
+    public function intentKeywords(): array
+    {
+        return HumanPhrases::PHRASES;
+    }
+
+    /** @return list<string> */
+    public function intentExemplars(): array
+    {
+        return [
+            'I want to talk to a human',
+            'connect me with support',
+            'can a real person help me',
+            'I need to speak with an agent about my problem',
         ];
     }
 }

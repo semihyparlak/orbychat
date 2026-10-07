@@ -10,10 +10,29 @@ use App\Models\Workspace;
 class MeteredBilling
 {
     /**
+     * The marketing demo workspace backs the public landing-page widget.
+     * It must NEVER hit a plan limit — a 429 on /widget/init there means
+     * marketing visitors can't even start a conversation with the demo
+     * bot. We exempt it by slug instead of by a boolean column so the
+     * exemption survives `php artisan migrate:fresh` + re-seed cycles
+     * without schema changes.
+     */
+    private const EXEMPT_WORKSPACE_SLUGS = ['orby-demo', 'orbychat-demo', 'orbychat-demo'];
+
+    private function isExempt(Workspace $workspace): bool
+    {
+        return in_array((string) $workspace->slug, self::EXEMPT_WORKSPACE_SLUGS, true);
+    }
+
+    /**
      * Returns true if the workspace can start a new conversation.
      */
     public function canStartConversation(Workspace $workspace): bool
     {
+        if ($this->isExempt($workspace)) {
+            return true;
+        }
+
         $plan = $workspace->plan ?? Plan::query()->where('slug', 'free')->first();
         if ($plan === null) {
             return true;
@@ -36,6 +55,10 @@ class MeteredBilling
      */
     public function canSendMessage(Workspace $workspace): bool
     {
+        if ($this->isExempt($workspace)) {
+            return true;
+        }
+
         $plan = $workspace->plan ?? Plan::query()->where('slug', 'free')->first();
         if ($plan === null) {
             return true;

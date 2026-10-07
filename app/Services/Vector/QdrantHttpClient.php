@@ -75,6 +75,17 @@ class QdrantHttpClient implements QdrantClient
         ]);
     }
 
+    public function dropCollection(string $name): void
+    {
+        try {
+            $this->http->delete("collections/{$name}");
+        } catch (\Throwable $e) {
+            if (! str_contains((string) $e->getMessage(), '404')) {
+                throw $e;
+            }
+        }
+    }
+
     private function buildFilter(array $filter): array
     {
         if ($filter === []) {

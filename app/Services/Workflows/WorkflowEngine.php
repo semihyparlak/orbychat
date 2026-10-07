@@ -7,6 +7,9 @@ use App\Models\Conversation;
 use App\Models\Lead;
 use App\Models\Workflow;
 use App\Models\WorkflowRun;
+use App\Services\Workflows\Concerns\SharesWorkflowSemantics;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Log;
 
 /**
  * Hot-path workflow runtime. Wired into MessageStreamController BEFORE
@@ -38,6 +41,11 @@ use App\Models\WorkflowRun;
  */
 class WorkflowEngine
 {
+    // Keyword matching, branch-case evaluation, clamping, tag
+    // normalization and interpolation live in the shared trait so the
+    // canvas test-run simulator executes the exact same semantics.
+    use SharesWorkflowSemantics;
+
     /**
      * Maximum branch jumps per turn before the engine bails out and
      * marks the run failed. A graph with 32+ branch hops in a single
@@ -55,33 +63,87 @@ class WorkflowEngine
         string $visitorMessage,
         callable $emit,
     ): bool {
-        $existing = WorkflowRun::query()
-            ->withoutGlobalScopes()
-            ->where('conversation_id', $conversation->id)
-            ->where('status', 'running')
-            ->latest('started_at')
-            ->first();
+        // Conversation-scoped atomic lock — buyer-audit 2026-05-16
+        // surfaced a TOCTOU race: two near-simultaneous turns BOTH read
+        // "no running WorkflowRun", then BOTH inserted one. Result:
+        // duplicate runs per conversation, second one ignored, scripted
+        // bubbles fire twice. Cache::lock serializes the whole resolve-
+        // or-create block per conversation; the second turn waits up to
+        // 5 seconds for the first to commit, then sees its run via the
+        // initial SELECT and resumes it instead of creating a sibling.
+        $lock = Cache::lock(
+            "workflow_engine:turn:{$conversation->id}",
+            10,
+        );
 
-        if ($existing !== null) {
-            return $this->resume($existing, $visitorMessage, $emit);
+        try {
+            // Wait up to 5s; if the prior turn is taking longer than
+            // that something is wrong upstream and we'd rather emit
+            // nothing than block the SSE stream further.
+            if (! $lock->block(5)) {
+                return false;
+            }
+
+            $existing = WorkflowRun::query()
+                ->withoutGlobalScopes()
+                ->where('conversation_id', $conversation->id)
+                ->where('status', 'running')
+                ->latest('started_at')
+                ->first();
+
+            if ($existing !== null) {
+                // Defence-in-depth: re-verify this run's workspace matches
+                // the visitor's agent workspace before resuming. The lookup
+                // above strips global scopes (widget JWT path has no
+                // admin session), so without this guard a cross-tenant
+                // conversation row could resume a foreign workspace's
+                // run. Hard-stop the turn if it doesn't match.
+                if (! $this->runOwnedByConversationWorkspace($existing, $conversation)) {
+                    Log::warning('workflow.cross_tenant_run_blocked', [
+                        'conversation_id' => $conversation->id,
+                        'run_id' => $existing->id,
+                    ]);
+
+                    return false;
+                }
+
+                return $this->resume($existing, $visitorMessage, $emit);
+            }
+
+            $workflow = $this->findMatching($conversation, $visitorMessage);
+            if ($workflow === null) {
+                return false;
+            }
+
+            $run = WorkflowRun::query()->withoutGlobalScopes()->create([
+                'workspace_id' => $workflow->workspace_id,
+                'workflow_id' => $workflow->id,
+                'conversation_id' => $conversation->id,
+                'status' => 'running',
+                'current_step_index' => 0,
+                'vars' => ['trigger_message' => $visitorMessage],
+                'started_at' => now(),
+            ]);
+
+            return $this->advance($run, $workflow, $emit);
+        } finally {
+            optional($lock)->release();
         }
+    }
 
-        $workflow = $this->findMatching($conversation, $visitorMessage);
-        if ($workflow === null) {
+    /**
+     * Cross-tenant guard for resumed WorkflowRun rows. The run's
+     * workspace_id must match the conversation's agent's workspace_id.
+     * Returns false on mismatch so handleTurn() refuses to resume.
+     */
+    private function runOwnedByConversationWorkspace(WorkflowRun $run, Conversation $conversation): bool
+    {
+        $agent = $conversation->agent()->withoutGlobalScopes()->first();
+        if ($agent === null) {
             return false;
         }
 
-        $run = WorkflowRun::query()->withoutGlobalScopes()->create([
-            'workspace_id' => $workflow->workspace_id,
-            'workflow_id' => $workflow->id,
-            'conversation_id' => $conversation->id,
-            'status' => 'running',
-            'current_step_index' => 0,
-            'vars' => ['trigger_message' => $visitorMessage],
-            'started_at' => now(),
-        ]);
-
-        return $this->advance($run, $workflow, $emit);
+        return (string) $run->workspace_id === (string) $agent->workspace_id;
     }
 
     /**
@@ -102,6 +164,12 @@ class WorkflowEngine
         // Active workflows scoped to this conversation's agent OR the
         // workspace-wide ones (agent_id IS NULL). Loaded once per turn —
         // this is the only DB read on the workflow path.
+        //
+        // Ordering: explicit priority desc, then most-recently-updated
+        // first, then by id for determinism. Pre-2026-05-16 the SELECT
+        // had no ORDER BY, so overlapping keyword triggers picked a
+        // winner based on DB scan order — could flip between requests
+        // on InnoDB. Buyer-audit finding.
         $workflows = Workflow::query()
             ->withoutGlobalScopes()
             ->where('status', 'active')
@@ -110,6 +178,9 @@ class WorkflowEngine
                 $w->whereNull('agent_id')
                     ->orWhere('agent_id', $agent->id);
             })
+            ->orderByDesc('priority')
+            ->orderByDesc('updated_at')
+            ->orderBy('id')
             ->get();
 
         foreach ($workflows as $workflow) {
@@ -132,71 +203,11 @@ class WorkflowEngine
      */
     private function keywordMatches(Workflow $workflow, string $needle): bool
     {
-        $keywords = $workflow->keywords();
-        if ($keywords === []) {
-            return false;
-        }
-
-        $mode = (string) ($workflow->trigger_config['match_mode'] ?? 'any');
-
-        return match ($mode) {
-            'all' => $this->allKeywordsMatch($keywords, $needle),
-            'exact' => $this->exactKeywordMatch($keywords, $needle),
-            default => $this->anyKeywordMatches($keywords, $needle),
-        };
-    }
-
-    /**
-     * @param  array<int, string>  $keywords
-     */
-    private function anyKeywordMatches(array $keywords, string $needle): bool
-    {
-        foreach ($keywords as $keyword) {
-            if ($keyword === '') {
-                continue;
-            }
-            if (str_contains($needle, mb_strtolower($keyword))) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    /**
-     * @param  array<int, string>  $keywords
-     */
-    private function allKeywordsMatch(array $keywords, string $needle): bool
-    {
-        $any = false;
-        foreach ($keywords as $keyword) {
-            if ($keyword === '') {
-                continue;
-            }
-            if (! str_contains($needle, mb_strtolower($keyword))) {
-                return false;
-            }
-            $any = true;
-        }
-
-        return $any;
-    }
-
-    /**
-     * @param  array<int, string>  $keywords
-     */
-    private function exactKeywordMatch(array $keywords, string $needle): bool
-    {
-        foreach ($keywords as $keyword) {
-            if ($keyword === '') {
-                continue;
-            }
-            if ($needle === mb_strtolower($keyword)) {
-                return true;
-            }
-        }
-
-        return false;
+        return $this->keywordSetMatches(
+            $workflow->keywords(),
+            (string) ($workflow->trigger_config['match_mode'] ?? 'any'),
+            $needle,
+        );
     }
 
     /**
@@ -215,9 +226,15 @@ class WorkflowEngine
         $currentStep = $steps[$run->current_step_index] ?? null;
 
         if (is_array($currentStep) && ($currentStep['type'] ?? '') === 'question') {
-            $varName = (string) ($currentStep['var_name'] ?? 'last_answer');
+            // Default must stay 'visitor_answer' — canvas builder
+            // (translator.ts:99, workflow-form.tsx:85) inserts that
+            // exact key; any other fallback silently breaks branches
+            // reading `{{ visitor_answer }}`.
+            $varName = (string) ($currentStep['var_name'] ?? 'visitor_answer');
             $vars = (array) ($run->vars ?? []);
-            $vars[$varName] = $visitorMessage;
+            $captured = mb_substr($visitorMessage, 0, 2000);
+            $vars[$varName] = $captured;
+            $vars = $this->boundVarsPayload($vars);
             $run->forceFill([
                 'vars' => $vars,
                 'current_step_index' => $run->current_step_index + 1,
@@ -368,74 +385,25 @@ class WorkflowEngine
      */
     private function resolveBranchTarget(array $step, array $vars, int $stepCount): ?int
     {
-        $varName = (string) ($step['var'] ?? '');
-        $value = $vars[$varName] ?? null;
-        $cases = (array) ($step['cases'] ?? []);
-        $default = null;
-
-        foreach ($cases as $case) {
-            if (! is_array($case)) {
-                continue;
-            }
-            $match = (string) ($case['match'] ?? 'equals');
-            $target = (int) ($case['go_to'] ?? -1);
-
-            if ($match === 'default') {
-                $default = $target;
-
-                continue;
-            }
-
-            if ($this->caseMatches($match, $value, $case['value'] ?? null)) {
-                return $this->clampTarget($target, $stepCount);
-            }
-        }
-
-        if ($default !== null) {
-            return $this->clampTarget($default, $stepCount);
-        }
-
-        return null;
-    }
-
-    private function caseMatches(string $match, mixed $varValue, mixed $caseValue): bool
-    {
-        $varStr = is_scalar($varValue) || $varValue === null ? (string) $varValue : '';
-        $caseStr = is_scalar($caseValue) || $caseValue === null ? (string) $caseValue : '';
-
-        return match ($match) {
-            'equals' => mb_strtolower($varStr) === mb_strtolower($caseStr),
-            'contains' => $caseStr !== '' && str_contains(mb_strtolower($varStr), mb_strtolower($caseStr)),
-            'starts_with' => $caseStr !== '' && str_starts_with(mb_strtolower($varStr), mb_strtolower($caseStr)),
-            'is_empty' => trim($varStr) === '',
-            'not_empty' => trim($varStr) !== '',
-            default => false,
-        };
-    }
-
-    private function clampTarget(int $target, int $stepCount): int
-    {
-        if ($target < 0) {
-            return 0;
-        }
-        if ($target > $stepCount) {
-            // Past the end → trigger the "walked off" completion path.
-            return $stepCount;
-        }
+        [$target] = $this->resolveBranchTargetWithCase($step, $vars, $stepCount);
 
         return $target;
     }
 
     /**
-     * @param  array<int, mixed>  $tags
-     * @return array<int, string>
+     * Cap vars payload at 16KB; drop oldest keys first.
+     *
+     * @param  array<string, mixed>  $vars
+     * @return array<string, mixed>
      */
-    private function normalizeTags(array $tags): array
+    private function boundVarsPayload(array $vars): array
     {
-        return array_values(array_unique(array_filter(
-            array_map(static fn ($t) => is_string($t) ? trim($t) : '', $tags),
-            static fn (string $t): bool => $t !== '',
-        )));
+        $maxBytes = 16384;
+        while (strlen((string) json_encode($vars)) > $maxBytes && count($vars) > 1) {
+            array_shift($vars);
+        }
+
+        return $vars;
     }
 
     /**
@@ -477,24 +445,5 @@ class WorkflowEngine
         $merged = $this->normalizeTags(array_merge($existingTags, $tags));
         $existingFields['tags'] = $merged;
         $lead->forceFill(['fields' => $existingFields])->save();
-    }
-
-    /**
-     * Tiny `{{var_name}}` substitution. Anything unrecognised is left
-     * untouched so the admin can preview the literal placeholder.
-     *
-     * @param  array<string, mixed>  $vars
-     */
-    private function interpolate(string $template, array $vars): string
-    {
-        return (string) preg_replace_callback(
-            '/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/',
-            function (array $m) use ($vars): string {
-                $key = $m[1];
-
-                return is_string($vars[$key] ?? null) ? $vars[$key] : $m[0];
-            },
-            $template,
-        );
     }
 }

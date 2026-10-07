@@ -2,15 +2,23 @@
 
 namespace App\Http\Controllers\Admin\Platform;
 
+use App\Models\Agent;
 use App\Models\AppSetting;
 use App\Models\CronTickLog;
 use App\Models\Lead;
 use App\Notifications\NewLeadCaptured;
 use App\Services\Billing\PayPalClient;
 use App\Services\Billing\RazorpayClient;
+use App\Services\Llm\CloudflareModelFetcher;
 use App\Services\Llm\Contracts\OpenAiClient;
+use App\Services\Llm\ModelCatalog;
+use App\Services\Llm\ModelLatencyProbe;
 use App\Support\AppBranding;
+use App\Support\AuditLogger;
+use App\Support\IntegrationCardsContent;
+use App\Support\LlmErrorPresenter;
 use App\Support\MarketingHomeContent;
+use App\Support\MarketingTheme;
 use App\Support\PrivacyPolicyContent;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
@@ -85,6 +93,26 @@ class SystemController
                 'reverb' => $this->reverbSummary(),
                 'marketing' => [
                     'customized' => ! empty($settings->marketing_home_content),
+                    // List of published agents available as the
+                    // marketing-site widget. Super-admin scope: every
+                    // workspace's published agent shown so the operator
+                    // can pick from any tenant. Empty list = no agents
+                    // published yet.
+                    'agent_options' => Agent::query()
+                        ->withoutGlobalScopes()
+                        ->where('is_published', true)
+                        ->orderBy('name')
+                        ->limit(200)
+                        ->get(['id', 'name', 'workspace_id'])
+                        ->map(fn ($a) => [
+                            'id' => $a->id,
+                            'label' => $a->name,
+                        ])
+                        ->values(),
+                    // Theme registry for the picker. `slugs` is the
+                    // validation set so the frontend can't post an
+                    // unknown value.
+                    'theme_options' => MarketingTheme::available(),
                 ],
                 'privacy' => [
                     'customized' => ! empty($settings->privacy_policy_content),
@@ -97,10 +125,10 @@ class SystemController
                     'last_status_at' => $settings->cron_worker_last_status_at?->toIso8601String(),
                     'cloudflare_configured' => ! empty(
                         $settings->cloudflare_account_id
-                            ?: env('CLOUDFLARE_ACCOUNT_ID', '')
+                            ?: config('services.cloudflare.account_id', '')
                     ) && ! empty(
                         $settings->cloudflare_api_token
-                            ?: env('CLOUDFLARE_API_TOKEN', '')
+                            ?: config('services.cloudflare.api_token', '')
                     ),
                     'callback_url' => rtrim((string) config('app.url'), '/').'/api/v1/internal/queue-tick',
                 ], $this->cronWorkerHealth()),
@@ -192,9 +220,17 @@ class SystemController
         // not "clear it". (To clear a value, the admin can type the
         // string "null" via the dedicated UI later; for now blank ==
         // no change.)
+        //
+        // Exception: a small allowlist of nullable keys where blank
+        // legitimately means "clear me" (e.g. unset the marketing-site
+        // widget agent picker so toggling back ON re-prompts the
+        // admin). For those keys we keep nulls through the strip.
+        $arraySections = ['pricing', 'integrations'];
+        $nullableClearKeys = ['marketing_widget_agent_id'];
         $data = array_filter(
             $data,
-            static fn ($v) => $v !== '' && $v !== null,
+            static fn ($v, $k) => ($v !== '' && $v !== null) || in_array($k, $nullableClearKeys, true),
+            ARRAY_FILTER_USE_BOTH,
         );
 
         if ($section === 'marketing' && array_key_exists('marketing_home_content', $data)) {
@@ -203,6 +239,25 @@ class SystemController
 
         if ($section === 'privacy' && array_key_exists('privacy_policy_content', $data)) {
             $data['privacy_policy_content'] = PrivacyPolicyContent::resolve($data['privacy_policy_content']);
+        }
+
+        // Allow the pricing / integrations sections to send empty
+        // arrays — those legitimately mean "reset to default fallback".
+        if (in_array($section, $arraySections, true)) {
+            foreach (['pricing_faqs', 'pricing_matrix', 'integrations_enabled', 'integration_cards'] as $key) {
+                if ($request->has($key) && ! isset($data[$key])) {
+                    $data[$key] = [];
+                }
+            }
+        }
+
+        // Normalise integration_cards through the support class so the
+        // stored shape is canonical (`{key,name,category,tagline,description}`)
+        // and discards anonymous extras the admin didn't ship.
+        if ($section === 'integrations' && array_key_exists('integration_cards', $data)) {
+            $data['integration_cards'] = IntegrationCardsContent::normalise(
+                is_array($data['integration_cards']) ? $data['integration_cards'] : []
+            );
         }
 
         if ($data === []) {
@@ -214,7 +269,114 @@ class SystemController
         $settings->save();
         AppSetting::flushSingleton();
 
-        return back()->with('success', ucfirst($section).' settings saved.');
+        // Marketing widget settings changes — drop the demo-agent
+        // caches so the toggle (or agent-id swap) takes effect on
+        // the next request. Otherwise admins would see the change
+        // up to 5 minutes later because MarketingDemoAgent caches
+        // the explicit-id validity (2 min) and the auto-discovered
+        // demo agent id (5 min). Client report 2026-05-23: "if I
+        // enable, disable the checkbox, it is not displayed right
+        // away, I have to wait some time".
+        if (array_intersect(array_keys($data), ['marketing_widget_enabled', 'marketing_widget_agent_id']) !== []) {
+            Cache::forget('marketing.demo_agent_id');
+            $explicit = config('services.marketing.demo_agent_id');
+            if (is_string($explicit) && $explicit !== '') {
+                Cache::forget('marketing.demo_agent_id.explicit_valid.'.$explicit);
+            }
+        }
+
+        // Platform-level setting changes are super-admin only and impact
+        // every workspace. We can't tag them to a single workspace, so
+        // they go on the acting user's default_workspace_id (always set
+        // for super_admins via the impersonation/onboarding flow). Secret
+        // values are stripped before write so the audit row never leaks
+        // a Stripe key or SMTP password — only the changed key names.
+        $auditWorkspace = $request->user()?->default_workspace_id;
+        if ($auditWorkspace !== null) {
+            $auditSafeKeys = collect(array_keys($data))
+                ->reject(fn ($k) => preg_match('/_(secret|password|api_key|token)$/i', (string) $k))
+                ->values()
+                ->all();
+            AuditLogger::log(
+                workspaceId: $auditWorkspace,
+                action: 'platform_settings.updated',
+                entityType: 'app_setting',
+                entityId: (string) AppSetting::SINGLETON_ID,
+                after: ['section' => $section, 'keys' => $auditSafeKeys],
+                request: $request,
+            );
+        }
+
+        // Marketing widget side-effect: if the operator just enabled
+        // the widget on a published agent, make sure the agent's
+        // allowed_origins contains APP_URL. Without that the widget
+        // loads but every /api/v1/widget/* call returns 403 — and the
+        // operator has no way to spot the mismatch from this page.
+        // We auto-add APP_URL (normalised to scheme://host) rather
+        // than reject the save, because rejecting would surprise the
+        // operator who's already on /settings/marketing.
+        $announcement = null;
+        if (
+            $section === 'marketing'
+            && ($settings->marketing_widget_enabled ?? false)
+            && ! empty($settings->marketing_widget_agent_id)
+        ) {
+            $announcement = $this->ensureMarketingAgentAllowsAppUrl($settings->marketing_widget_agent_id);
+        }
+
+        return back()->with('success', ucfirst($section).' settings saved.'.($announcement ? ' '.$announcement : ''));
+    }
+
+    /**
+     * Add APP_URL's scheme://host to the picked marketing-widget
+     * agent's allowed_origins when it isn't already present. Returns
+     * a human-readable message describing what happened, or null when
+     * no change was needed.
+     */
+    private function ensureMarketingAgentAllowsAppUrl(string $agentId): ?string
+    {
+        $appUrl = (string) config('app.url');
+        if ($appUrl === '') {
+            return null;
+        }
+
+        $scheme = parse_url($appUrl, PHP_URL_SCHEME);
+        $host = parse_url($appUrl, PHP_URL_HOST);
+        if (! is_string($scheme) || ! is_string($host) || $scheme === '' || $host === '') {
+            return null;
+        }
+
+        $port = parse_url($appUrl, PHP_URL_PORT);
+        $needed = strtolower($scheme).'://'.strtolower($host).(is_int($port) ? ':'.$port : '');
+
+        $agent = Agent::query()->withoutGlobalScopes()->find($agentId);
+        if ($agent === null) {
+            return null;
+        }
+
+        $current = array_values(array_filter(array_map(
+            static fn ($o) => is_string($o) ? trim($o) : '',
+            (array) ($agent->allowed_origins ?? []),
+        ), static fn ($o) => $o !== ''));
+
+        foreach ($current as $existing) {
+            $existingHost = parse_url($existing, PHP_URL_HOST);
+            $existingScheme = parse_url($existing, PHP_URL_SCHEME);
+            $existingPort = parse_url($existing, PHP_URL_PORT);
+            if (! is_string($existingHost) || ! is_string($existingScheme)) {
+                continue;
+            }
+            $normalised = strtolower($existingScheme).'://'.strtolower($existingHost).(is_int($existingPort) ? ':'.$existingPort : '');
+            if ($normalised === $needed || $existing === '*') {
+                return null; // Already allowed.
+            }
+        }
+
+        $agent->forceFill([
+            'allowed_origins' => [...$current, $needed],
+        ])->save();
+
+        return sprintf('Added "%s" to the agent\'s allowed_origins so the widget can load on the marketing site.', $needed);
     }
 
     public function testMail(Request $request): JsonResponse
@@ -380,14 +542,144 @@ class SystemController
 
             $text = trim(implode('', $tokens));
 
-            if ($text === '') {
-                return $this->fail('LLM stream returned no tokens.');
+            if ($text !== '') {
+                return $this->ok('LLM responded: '.mb_substr($text, 0, 80));
             }
 
-            return $this->ok('LLM responded: '.mb_substr($text, 0, 80));
+            // Streaming returned zero tokens but no exception was
+            // thrown. That used to surface as "LLM stream returned no
+            // tokens." which was a dead end for the buyer. Fall back
+            // to a non-streaming call (`chatWithTools`) to figure out
+            // whether the provider is healthy AT ALL or whether
+            // streaming-specifically is broken. Buyer report
+            // 2026-05-29: non-Llama Cloudflare models hit this path.
+            $nonStream = $client->chatWithTools(
+                messages: [['role' => 'user', 'content' => 'Reply with the single word "ok".']],
+                tools: [],
+                opts: ['max_tokens' => 8],
+            );
+            $nonStreamText = trim((string) ($nonStream['content'] ?? ''));
+
+            if ($nonStreamText === '') {
+                return $this->fail(
+                    'No content via streaming OR non-streaming — the configured model has no OpenAI-compatible chat endpoint. Switch to a streaming-capable slug like @cf/meta/llama-3.3-70b-instruct-fp8-fast.'
+                );
+            }
+
+            return $this->fail(sprintf(
+                'Non-streaming worked (%s) but streaming returned zero tokens. The model lacks OpenAI-style streaming. Pick a streaming-capable @cf/meta/llama-* slug instead.',
+                mb_substr($nonStreamText, 0, 40),
+            ));
         } catch (\Throwable $e) {
             return $this->fail($e->getMessage());
         }
+    }
+
+    public function testAzureFoundry(Request $request): JsonResponse
+    {
+        $endpoint = (string) ($request->input('azure_foundry_endpoint') ?: config('services.azure_foundry.endpoint', ''));
+        $apiKey = (string) ($request->input('azure_foundry_api_key') ?: config('services.azure_foundry.api_key', ''));
+        $deployment = (string) ($request->input('azure_foundry_deployment') ?: config('services.azure_foundry.deployment', 'gpt-4o'));
+        $apiVersion = (string) ($request->input('azure_foundry_api_version') ?: config('services.azure_foundry.api_version', '2024-06-01'));
+
+        if ($endpoint === '' || $apiKey === '') {
+            return $this->fail('Azure AI Foundry endpoint or API key is not configured.');
+        }
+
+        try {
+            $client = new \App\Services\Llm\AzureFoundryClient(
+                endpoint: $endpoint,
+                apiKey: $apiKey,
+                deployment: $deployment,
+                apiVersion: $apiVersion,
+            );
+
+            $tokens = [];
+            foreach ($client->streamChat(
+                [['role' => 'user', 'content' => 'Reply with the single word "ok".']],
+                ['max_tokens' => 8],
+            ) as $tok) {
+                $tokens[] = $tok;
+                if (count($tokens) >= 16) {
+                    break;
+                }
+            }
+
+            $text = trim(implode('', $tokens));
+            if ($text !== '') {
+                return $this->ok('Azure AI Foundry responded: '.mb_substr($text, 0, 80));
+            }
+
+            $nonStream = $client->chatWithTools(
+                messages: [['role' => 'user', 'content' => 'Reply with the single word "ok".']],
+                tools: [],
+                opts: ['max_tokens' => 8],
+            );
+            $nonStreamText = trim((string) ($nonStream['content'] ?? ''));
+            if ($nonStreamText !== '') {
+                return $this->ok('Azure AI Foundry responded: '.mb_substr($nonStreamText, 0, 80));
+            }
+
+            return $this->fail('Azure AI Foundry returned empty response.');
+        } catch (\Throwable $e) {
+            return $this->fail($e->getMessage());
+        }
+    }
+
+    /**
+     * Live latency probe per provider+model. Runs a one-token streamChat,
+     * records first-token + total wall time, caches 24h. Buyer hits this
+     * via the "Test connection" button on the model dropdown — answers
+     * "is gpt-4o-mini actually fast from my server?" without making them
+     * trust the published estimate.
+     *
+     * Rate-limited 10/min per admin so a chatty UI does not hammer the
+     * provider's API.
+     */
+    public function probeLatency(Request $request): JsonResponse
+    {
+        $data = $request->validate([
+            'provider' => ['required', 'string', 'in:cloudflare,openai,openrouter'],
+            'model' => ['required', 'string', 'max:255'],
+            'force' => ['sometimes', 'boolean'],
+        ]);
+
+        $key = 'llm-latency-probe:'.($request->user()?->id ?? $request->ip());
+        if (Cache::get($key, 0) >= 10) {
+            return response()->json([
+                'ok' => false,
+                'error' => 'Too many probes. Wait a minute and try again.',
+            ], 429);
+        }
+        Cache::put($key, Cache::get($key, 0) + 1, now()->addMinute());
+
+        $result = app(ModelLatencyProbe::class)->measure(
+            $data['provider'],
+            $data['model'],
+            (bool) ($data['force'] ?? true),
+        );
+
+        return response()->json($result);
+    }
+
+    /**
+     * Force-refresh the live Cloudflare model list. Returns the merged
+     * static + live catalogue so the UI can re-render immediately.
+     */
+    public function refreshCloudflareModels(Request $request): JsonResponse
+    {
+        $key = 'llm-cf-models-refresh:'.($request->user()?->id ?? $request->ip());
+        if (Cache::get($key, 0) >= 5) {
+            return response()->json([
+                'ok' => false,
+                'error' => 'Too many refreshes. Wait a minute and try again.',
+            ], 429);
+        }
+        Cache::put($key, Cache::get($key, 0) + 1, now()->addMinute());
+
+        $fetched = app(CloudflareModelFetcher::class)->fetch(force: true);
+
+        return response()->json($fetched);
     }
 
     public function testEmbed(): JsonResponse
@@ -463,6 +755,8 @@ class SystemController
                 'cloudflare_chat_model' => ['nullable', 'string', 'max:255'],
                 'cloudflare_embed_model' => ['nullable', 'string', 'max:255'],
                 'cloudflare_vectorize_index' => ['nullable', 'string', 'max:255'],
+                'cloudflare_ai_gateway_url' => ['nullable', 'string', 'url', 'max:500'],
+                'cloudflare_browser_rendering' => ['sometimes', 'boolean'],
             ],
             'openai' => [
                 'openai_api_key' => ['nullable', 'string', 'max:255'],
@@ -473,9 +767,22 @@ class SystemController
                 'openrouter_api_key' => ['nullable', 'string', 'max:255'],
                 'openrouter_chat_model' => ['nullable', 'string', 'max:255'],
             ],
+            'azure_foundry' => [
+                'azure_foundry_enabled' => ['required', 'boolean'],
+                'azure_foundry_endpoint' => ['nullable', 'string', 'max:500'],
+                'azure_foundry_api_key' => ['nullable', 'string', 'max:500'],
+                'azure_foundry_deployment' => ['nullable', 'string', 'max:255'],
+                'azure_foundry_embed_model' => ['nullable', 'string', 'max:255'],
+                'azure_foundry_api_version' => ['nullable', 'string', 'max:64'],
+            ],
             'routing' => [
-                'llm_provider' => ['nullable', 'string', 'in:cloudflare,openai,openrouter'],
+                'llm_provider' => ['nullable', 'string', 'in:azure_foundry,cloudflare,openai,openrouter'],
                 'vector_provider' => ['nullable', 'string', 'in:cloudflare,qdrant'],
+            ],
+            // C1: global BYOK toggle. When `1`, every workspace must
+            // supply its own AI keys; platform keys never resolve.
+            'byok' => [
+                'byok_enabled_globally' => ['required', 'boolean'],
             ],
             'mail' => [
                 'mail_driver' => ['nullable', 'string', 'max:32'],
@@ -492,6 +799,9 @@ class SystemController
                 'header_logo' => ['nullable', 'file', 'mimes:png,jpg,jpeg,svg,webp', 'max:4096'],
                 'footer_logo' => ['nullable', 'file', 'mimes:png,jpg,jpeg,svg,webp', 'max:4096'],
                 'dashboard_logo' => ['nullable', 'file', 'mimes:png,jpg,jpeg,svg,webp', 'max:4096'],
+                'header_logo_dark' => ['nullable', 'file', 'mimes:png,jpg,jpeg,svg,webp', 'max:4096'],
+                'footer_logo_dark' => ['nullable', 'file', 'mimes:png,jpg,jpeg,svg,webp', 'max:4096'],
+                'dashboard_logo_dark' => ['nullable', 'file', 'mimes:png,jpg,jpeg,svg,webp', 'max:4096'],
                 'favicon' => ['nullable', 'file', 'mimes:png,jpg,jpeg,svg,webp,ico', 'max:2048'],
                 'header_brand_display' => ['nullable', 'string', 'in:logo_text,logo_only,text_only'],
                 'footer_brand_display' => ['nullable', 'string', 'in:logo_text,logo_only,text_only'],
@@ -499,12 +809,96 @@ class SystemController
                 'orbychat_brand_url' => ['nullable', 'url', 'max:500'],
                 'orbychat_brand_label' => ['nullable', 'string', 'max:120'],
                 'marketing_site_enabled' => ['sometimes', 'boolean'],
+                // Admin-editable side-panel copy for the auth pages
+                // (Aurora / Prism). Empty/null on any field = theme
+                // falls back to its bundled default.
+                'auth_aside_eyebrow' => ['nullable', 'string', 'max:120'],
+                'auth_aside_heading' => ['nullable', 'string', 'max:200'],
+                'auth_aside_lede' => ['nullable', 'string', 'max:1000'],
+                'auth_aside_bullets' => ['nullable', 'array', 'max:6'],
+                'auth_aside_bullets.*' => ['nullable', 'string', 'max:200'],
             ],
             'marketing' => [
-                'marketing_home_content' => ['required', 'array'],
+                // Was `required` until the widget sub-section was carved out
+                // into its own form (2026-05-21). The widget form only sends
+                // marketing_widget_enabled + marketing_widget_agent_id, so
+                // requiring the home content here 422'd every widget save.
+                // Controller already guards re-resolution with array_key_exists.
+                'marketing_home_content' => ['sometimes', 'array'],
+                'marketing_widget_enabled' => ['sometimes', 'boolean'],
+                'marketing_widget_agent_id' => ['sometimes', 'nullable', 'uuid'],
+                // Theme slug must be one of the registered themes —
+                // unknown values would silently fall back to `harvest`
+                // at render time, but rejecting at save time gives the
+                // operator clearer feedback.
+                'marketing_theme' => ['sometimes', 'string', 'in:'.implode(',', MarketingTheme::availableSlugs())],
             ],
             'privacy' => [
                 'privacy_policy_content' => ['required', 'array'],
+            ],
+            // Buyer-reported (Lucian, 2026-05-15): "would be nice to
+            // have a checkbox on settings to send email to admin at
+            // least with new subscriptions". Daily digest is opt-in;
+            // command short-circuits when this flag is false.
+            'notifications' => [
+                'admin_daily_digest_enabled' => ['required', 'boolean'],
+            ],
+            // Signup flow controls — email-verify enforcement +
+            // default-signup-plan selection both live here.
+            // Buyer-reported (2026-05-19).
+            'signup' => [
+                'require_email_verification' => ['required', 'boolean'],
+            ],
+            // WordPress / WooCommerce plugin distribution. Buyer-reported
+            // (2026-05-20) the integrations page hard-coded a "Download
+            // from your CodeCanyon receipt" instruction that doesn't fit
+            // installs hosting their own plugin mirror.
+            'wordpress_plugin' => [
+                'wordpress_plugin_download_url' => ['nullable', 'string', 'url', 'max:500'],
+                'wordpress_plugin_help_text' => ['nullable', 'string', 'max:2000'],
+            ],
+            // "Integrations available to workspaces" toggles on
+            // /settings/system?section=integrations. Buyer reported
+            // (Jamiu, 2026-05-20) that saving the form 404'd because
+            // the section wasn't enumerated here (or in the route
+            // regex). The form posts a flat map of kind=>boolean
+            // which we project into the `integrations_enabled` JSON
+            // column on AppSetting.
+            'integrations' => [
+                'integrations_enabled' => ['sometimes', 'array'],
+                'integrations_enabled.slack' => ['sometimes', 'boolean'],
+                'integrations_enabled.notion' => ['sometimes', 'boolean'],
+                'integrations_enabled.google' => ['sometimes', 'boolean'],
+                'integrations_enabled.webhooks' => ['sometimes', 'boolean'],
+                'integrations_enabled.wordpress' => ['sometimes', 'boolean'],
+                // Per-card copy overrides for the public /integrations
+                // landing page. Only the editable fields are validated;
+                // icon + accent stay controlled by the codebase so the
+                // admin can't accidentally break the layout. Empty rows
+                // legitimately mean "reset this card's copy to default".
+                'integration_cards' => ['sometimes', 'array'],
+                'integration_cards.*.key' => ['sometimes', 'nullable', 'string', 'max:120'],
+                'integration_cards.*.name' => ['sometimes', 'nullable', 'string', 'max:120'],
+                'integration_cards.*.category' => ['sometimes', 'nullable', 'string', 'max:120'],
+                'integration_cards.*.tagline' => ['sometimes', 'nullable', 'string', 'max:300'],
+                'integration_cards.*.description' => ['sometimes', 'nullable', 'string', 'max:2000'],
+            ],
+            // Pricing-matrix / FAQs editor on the marketing tab.
+            // Same missing-section bug — referenced by `$arraySections`
+            // higher in update() but never validated here, so saves
+            // 404'd. Schema mirrors the public /pricing page payload.
+            // Validator keys must match BOTH the admin form
+            // (resources/js/pages/settings/system.tsx → {q,a}) AND the
+            // public-side reader (MarketingController::pricingFaqs() →
+            // {q,a}). Client report 2026-05-22: prior validator used
+            // {question,answer} so Laravel's validate() stripped every
+            // q/a key from the payload, persisting empty rows. The
+            // /pricing surface then rendered the hard-coded defaults.
+            'pricing' => [
+                'pricing_faqs' => ['sometimes', 'array'],
+                'pricing_faqs.*.q' => ['required_with:pricing_faqs.*', 'string', 'max:255'],
+                'pricing_faqs.*.a' => ['required_with:pricing_faqs.*', 'string', 'max:5000'],
+                'pricing_matrix' => ['sometimes', 'array'],
             ],
             default => null,
         };
@@ -553,6 +947,8 @@ class SystemController
             'cloudflare_chat_model' => $s->cloudflare_chat_model,
             'cloudflare_embed_model' => $s->cloudflare_embed_model,
             'cloudflare_vectorize_index' => $s->cloudflare_vectorize_index,
+            'cloudflare_ai_gateway_url' => $s->cloudflare_ai_gateway_url,
+            'cloudflare_browser_rendering' => (bool) ($s->cloudflare_browser_rendering ?? true),
 
             // OpenAI / OpenRouter — keys sensitive, models public.
             'openai_api_key_set' => ! empty($s->openai_api_key),
@@ -560,6 +956,14 @@ class SystemController
             'openai_embed_model' => $s->openai_embed_model,
             'openrouter_api_key_set' => ! empty($s->openrouter_api_key),
             'openrouter_chat_model' => $s->openrouter_chat_model,
+
+            // Azure AI Foundry — key sensitive, others public.
+            'azure_foundry_enabled' => (bool) $s->azure_foundry_enabled,
+            'azure_foundry_endpoint' => $s->azure_foundry_endpoint,
+            'azure_foundry_api_key_set' => ! empty($s->azure_foundry_api_key),
+            'azure_foundry_deployment' => $s->azure_foundry_deployment ?: 'gpt-4o',
+            'azure_foundry_embed_model' => $s->azure_foundry_embed_model ?: 'text-embedding-3-small',
+            'azure_foundry_api_version' => $s->azure_foundry_api_version ?: '2024-06-01',
 
             // Provider routing.
             'llm_provider' => $s->llm_provider,
@@ -580,17 +984,51 @@ class SystemController
             'header_logo_url' => AppBranding::assetUrl($s->header_logo_path),
             'footer_logo_url' => AppBranding::assetUrl($s->footer_logo_path),
             'dashboard_logo_url' => AppBranding::assetUrl($s->dashboard_logo_path),
+            'header_logo_dark_url' => AppBranding::assetUrl($s->header_logo_dark_path),
+            'footer_logo_dark_url' => AppBranding::assetUrl($s->footer_logo_dark_path),
+            'dashboard_logo_dark_url' => AppBranding::assetUrl($s->dashboard_logo_dark_path),
             'favicon_url' => AppBranding::assetUrl($s->favicon_path),
             'header_brand_display' => $branding['header_brand_display'],
             'footer_brand_display' => $branding['footer_brand_display'],
             'dashboard_brand_display' => $branding['dashboard_brand_display'],
             'orbychat_brand_url' => $s->orbychat_brand_url,
             'orbychat_brand_label' => $s->orbychat_brand_label,
+            'auth_aside_eyebrow' => (string) ($s->auth_aside_eyebrow ?? ''),
+            'auth_aside_heading' => (string) ($s->auth_aside_heading ?? ''),
+            'auth_aside_lede' => (string) ($s->auth_aside_lede ?? ''),
+            'auth_aside_bullets' => is_array($s->auth_aside_bullets) ? $s->auth_aside_bullets : [],
             'marketing_site_enabled' => (bool) ($s->marketing_site_enabled ?? true),
+
+            // Pick-your-own-agent for the public marketing site widget.
+            // Default: OFF (no widget); when ON the chosen agent speaks
+            // to anonymous visitors on /welcome + /marketing/*.
+            'marketing_widget_enabled' => (bool) ($s->marketing_widget_enabled ?? false),
+            'marketing_widget_agent_id' => $s->marketing_widget_agent_id,
+            'marketing_theme' => $s->marketing_theme ?: MarketingTheme::DEFAULT_SLUG,
 
             // Marketing homepage content — edited via a structured form.
             'marketing_home_content' => MarketingHomeContent::resolve($s->marketing_home_content),
             'privacy_policy_content' => PrivacyPolicyContent::resolve($s->privacy_policy_content),
+
+            // Pricing surfaces — admin-editable. Empty = use defaults.
+            'pricing_faqs' => is_array($s->pricing_faqs) ? $s->pricing_faqs : [],
+            'pricing_matrix' => is_array($s->pricing_matrix) ? $s->pricing_matrix : [],
+
+            // Integrations enable/disable per kind. NULL/empty = all on.
+            'integrations_enabled' => is_array($s->integrations_enabled) ? $s->integrations_enabled : [],
+            // Per-card copy overrides for the public /integrations
+            // landing page — resolved (defaults overlaid with admin
+            // overrides) so the React form can prefill with whatever
+            // visitors currently see.
+            'integration_cards' => IntegrationCardsContent::editorRows(),
+
+            // C1: app-wide BYOK gate. When true, platform AI keys never
+            // resolve — workspaces must provision their own.
+            'byok_enabled_globally' => (bool) $s->byok_enabled_globally,
+            'admin_daily_digest_enabled' => (bool) ($s->admin_daily_digest_enabled ?? false),
+            'require_email_verification' => (bool) ($s->require_email_verification ?? false),
+            'wordpress_plugin_download_url' => (string) ($s->wordpress_plugin_download_url ?? ''),
+            'wordpress_plugin_help_text' => (string) ($s->wordpress_plugin_help_text ?? ''),
         ];
     }
 
@@ -608,9 +1046,19 @@ class SystemController
             'header_logo' => 'header_logo_path',
             'footer_logo' => 'footer_logo_path',
             'dashboard_logo' => 'dashboard_logo_path',
+            'header_logo_dark' => 'header_logo_dark_path',
+            'footer_logo_dark' => 'footer_logo_dark_path',
+            'dashboard_logo_dark' => 'dashboard_logo_dark_path',
             'favicon' => 'favicon_path',
         ] as $input => $column) {
             $data = $this->storeBrandingUpload($data, $settings, $input, $column);
+        }
+
+        if (array_key_exists('orbychat_brand_url', $data)) {
+            $data['orbychat_brand_url'] = $data['orbychat_brand_url'];
+        }
+        if (array_key_exists('orbychat_brand_label', $data)) {
+            $data['orbychat_brand_label'] = $data['orbychat_brand_label'];
         }
 
         return $data;
@@ -728,30 +1176,119 @@ class SystemController
 
     private function llmSummary(): array
     {
-        $provider = (string) (config('services.llm.provider') ?: env('LLM_PROVIDER', ''));
-        $cfAccount = (string) (config('services.cloudflare.account_id') ?: env('CLOUDFLARE_ACCOUNT_ID', ''));
-        $cfToken = (string) (config('services.cloudflare.api_token') ?: env('CLOUDFLARE_API_TOKEN', ''));
-        $openAiKey = (string) (config('services.openai.key') ?: env('OPENAI_API_KEY', ''));
-        $openRouterKey = (string) (config('services.openrouter.key') ?: env('OPENROUTER_API_KEY', ''));
+        $provider = (string) config('services.llm.provider', '');
+        $cfAccount = (string) config('services.cloudflare.account_id', '');
+        $cfToken = (string) config('services.cloudflare.api_token', '');
+        $openAiKey = (string) config('services.openai.key', '');
+        $openRouterKey = (string) config('services.openrouter.key', '');
+        $afEnabled = (bool) config('services.azure_foundry.enabled', false);
+        $afEndpoint = (string) config('services.azure_foundry.endpoint', '');
+        $afKey = (string) config('services.azure_foundry.api_key', '');
+        $afDeployment = (string) config('services.azure_foundry.deployment', 'gpt-4o');
+        $afEmbedModel = (string) config('services.azure_foundry.embed_model', 'text-embedding-3-small');
+        $afApiVersion = (string) config('services.azure_foundry.api_version', '2024-06-01');
+        $hasAzureFoundry = $afEnabled && $afEndpoint !== '' && $afKey !== '';
 
         $resolved = match (true) {
+            $provider === 'azure_foundry' || ($provider === '' && $hasAzureFoundry) => 'azure_foundry',
             $provider === 'cloudflare' || ($provider === '' && $cfAccount !== '' && $cfToken !== '') => 'cloudflare',
             $provider === 'openrouter' => 'openrouter',
             $openAiKey !== '' => 'openai',
             default => 'fake',
         };
 
+        $catalog = app(ModelCatalog::class);
+        $probe = app(ModelLatencyProbe::class);
+        $cfFetcher = app(CloudflareModelFetcher::class);
+
+        $cfModel = (string) config('services.cloudflare.chat_model', '@cf/meta/llama-3.3-70b-instruct-fp8-fast');
+        $openaiModel = (string) config('services.openai.chat_model', 'gpt-4o-mini');
+        $openrouterModel = (string) config('services.openrouter.chat_model', 'meta-llama/llama-3.3-70b-instruct:free');
+
+        $cfStatic = $catalog->forProvider(ModelCatalog::PROVIDER_CLOUDFLARE);
+        $cfMerged = $this->mergeWithLiveCloudflare($cfStatic, $cfFetcher->cached());
+
         return [
             'provider_env' => $provider !== '' ? $provider : '(auto)',
             'resolved' => $resolved,
+            'azure_foundry_enabled' => $afEnabled,
+            'azure_foundry_configured' => $afEndpoint !== '' && $afKey !== '',
+            'azure_foundry_endpoint' => $afEndpoint,
+            'azure_foundry_key' => $afKey !== '' ? $this->maskTail($afKey) : null,
+            'azure_foundry_deployment' => $afDeployment,
+            'azure_foundry_embed_model' => $afEmbedModel,
+            'azure_foundry_api_version' => $afApiVersion,
             'cloudflare_account' => $cfAccount !== '' ? $this->maskTail($cfAccount) : null,
-            'cloudflare_chat_model' => config('services.cloudflare.chat_model') ?: env('CLOUDFLARE_CHAT_MODEL', '@cf/meta/llama-3.3-70b-instruct-fp8-fast'),
+            'cloudflare_chat_model' => $cfModel,
             'openai_key' => $openAiKey !== '' ? $this->maskTail($openAiKey) : null,
-            'openai_chat_model' => config('services.openai.chat_model') ?: env('OPENAI_CHAT_MODEL', 'gpt-4o-mini'),
+            'openai_chat_model' => $openaiModel,
             'openrouter_key' => $openRouterKey !== '' ? $this->maskTail($openRouterKey) : null,
-            'openrouter_chat_model' => config('services.openrouter.chat_model') ?: env('OPENROUTER_CHAT_MODEL', 'meta-llama/llama-3.3-70b-instruct:free'),
+            'openrouter_chat_model' => $openrouterModel,
             'configured' => $resolved !== 'fake',
+            'model_catalog' => [
+                ModelCatalog::PROVIDER_CLOUDFLARE => $cfMerged,
+                ModelCatalog::PROVIDER_OPENAI => $catalog->forProvider(ModelCatalog::PROVIDER_OPENAI),
+                ModelCatalog::PROVIDER_OPENROUTER => $catalog->forProvider(ModelCatalog::PROVIDER_OPENROUTER),
+            ],
+            'embed_catalog' => [
+                ModelCatalog::PROVIDER_CLOUDFLARE => $catalog->embedModelsForProvider(ModelCatalog::PROVIDER_CLOUDFLARE),
+                ModelCatalog::PROVIDER_OPENAI => $catalog->embedModelsForProvider(ModelCatalog::PROVIDER_OPENAI),
+                ModelCatalog::PROVIDER_OPENROUTER => $catalog->embedModelsForProvider(ModelCatalog::PROVIDER_OPENROUTER),
+            ],
+            'current_vector_dim' => (int) config('services.vector_dim', 768),
+            'model_latencies' => [
+                ModelCatalog::PROVIDER_CLOUDFLARE => $probe->cached(ModelCatalog::PROVIDER_CLOUDFLARE, $cfModel),
+                ModelCatalog::PROVIDER_OPENAI => $probe->cached(ModelCatalog::PROVIDER_OPENAI, $openaiModel),
+                ModelCatalog::PROVIDER_OPENROUTER => $probe->cached(ModelCatalog::PROVIDER_OPENROUTER, $openrouterModel),
+            ],
+            'cloudflare_live_models_fetched_at' => $cfFetcher->cached()['fetched_at'] ?? null,
         ];
+    }
+
+    /**
+     * Merge the live Cloudflare model IDs into the static catalogue.
+     * Static entries win on metadata; live-only IDs append at the end
+     * with default tier/cost so the buyer can still pick them.
+     *
+     * @param  array<int, array<string, mixed>>  $static
+     * @param  array{ok: bool, ids: array<int, string>, error: string|null, fetched_at: string|null}|null  $cachedLive
+     * @return array<int, array<string, mixed>>
+     */
+    private function mergeWithLiveCloudflare(array $static, ?array $cachedLive): array
+    {
+        if ($cachedLive === null || ! ($cachedLive['ok'] ?? false)) {
+            return $static;
+        }
+
+        $staticIds = array_flip(array_map(fn ($e) => $e['id'], $static));
+        $merged = $static;
+
+        foreach ($cachedLive['ids'] as $id) {
+            if (isset($staticIds[$id])) {
+                continue;
+            }
+            $merged[] = [
+                'id' => $id,
+                'label' => $this->prettyLabelForCloudflareId($id),
+                'provider' => ModelCatalog::PROVIDER_CLOUDFLARE,
+                'ttft_ms' => 300,
+                'tier' => ModelCatalog::TIER_MEDIUM,
+                'cost' => '$$',
+                'context_tokens' => 8000,
+                'supports_tools' => false,
+                'recommended' => false,
+                'notes' => 'Discovered from Cloudflare API. Click "Test connection" to confirm.',
+            ];
+        }
+
+        return $merged;
+    }
+
+    private function prettyLabelForCloudflareId(string $id): string
+    {
+        $name = preg_replace('#^@cf/[^/]+/#', '', $id) ?? $id;
+
+        return ucfirst(str_replace(['-', '_'], ' ', $name));
     }
 
     private function cacheSummary(): array
@@ -766,9 +1303,9 @@ class SystemController
 
     private function vectorSummary(): array
     {
-        $provider = (string) (config('services.vector.provider') ?: env('VECTOR_PROVIDER', ''));
-        $cfAccount = (string) (config('services.cloudflare.account_id') ?: env('CLOUDFLARE_ACCOUNT_ID', ''));
-        $qdrantUrl = (string) env('QDRANT_URL', '');
+        $provider = (string) config('services.vector.provider', '');
+        $cfAccount = (string) config('services.cloudflare.account_id', '');
+        $qdrantUrl = (string) config('services.qdrant.url', '');
 
         $resolved = match (true) {
             $provider === 'cloudflare' || ($provider === '' && $cfAccount !== '') => 'cloudflare-vectorize',
@@ -779,7 +1316,7 @@ class SystemController
         return [
             'provider_env' => $provider !== '' ? $provider : '(auto)',
             'resolved' => $resolved,
-            'vectorize_index' => config('services.cloudflare.vectorize_index') ?: env('CLOUDFLARE_VECTORIZE_INDEX', 'orbychat-chunks'),
+            'vectorize_index' => config('services.cloudflare.vectorize_index', 'orbychat-chunks'),
             'qdrant_url' => $qdrantUrl !== '' ? $qdrantUrl : null,
             'configured' => $resolved !== 'fake',
         ];
@@ -814,6 +1351,9 @@ class SystemController
 
     private function fail(string $message): JsonResponse
     {
-        return response()->json(['ok' => false, 'message' => $message], 200);
+        return response()->json([
+            'ok' => false,
+            'message' => LlmErrorPresenter::present($message) ?? $message,
+        ], 200);
     }
 }

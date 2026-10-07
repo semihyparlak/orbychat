@@ -24,7 +24,10 @@ import {
 import type { LucideIcon } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import BrandLockup from '@/components/brand-lockup';
+import { useConfirm } from '@/components/confirm-dialog-provider';
 import Heading from '@/components/heading';
+import { EmbedModelPicker } from '@/components/settings/embed-model-picker';
+import { ModelPicker } from '@/components/settings/model-picker';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
@@ -38,8 +41,10 @@ import {
     SelectValue,
 } from '@/components/ui/select';
 import { Separator } from '@/components/ui/separator';
+import { useBranding } from '@/hooks/use-branding';
 import { BRAND_DISPLAY_OPTIONS } from '@/lib/brand-display';
 import type { BrandDisplayMode } from '@/lib/brand-display';
+import { useT } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
 import { update as updateSystemSettings } from '@/routes/settings/system';
 import MarketingContentEditor from './marketing-content-editor';
@@ -84,9 +89,51 @@ type RazorpaySummary = {
     configured: boolean;
 };
 
+type ModelCatalogEntry = {
+    id: string;
+    label: string;
+    provider: 'cloudflare' | 'openai' | 'openrouter';
+    ttft_ms: number;
+    tier: 'fast' | 'medium' | 'slow';
+    cost: string;
+    context_tokens: number;
+    supports_tools: boolean;
+    recommended: boolean;
+    notes: string;
+};
+
+type ModelLatency = {
+    ok: boolean;
+    ttft_ms: number | null;
+    total_ms: number | null;
+    measured_at: string | null;
+    error: string | null;
+    provider: string;
+    model: string;
+};
+
+type EmbedCatalogEntry = {
+    id: string;
+    label: string;
+    provider: 'cloudflare' | 'openai' | 'openrouter';
+    dimensions: number;
+    max_input_tokens: number;
+    languages: string;
+    cost: string;
+    recommended: boolean;
+    notes: string;
+};
+
 type LlmSummary = {
     provider_env: string;
-    resolved: 'cloudflare' | 'openrouter' | 'openai' | 'fake';
+    resolved: 'azure_foundry' | 'cloudflare' | 'openrouter' | 'openai' | 'fake';
+    azure_foundry_enabled?: boolean;
+    azure_foundry_configured?: boolean;
+    azure_foundry_endpoint?: string | null;
+    azure_foundry_key?: string | null;
+    azure_foundry_deployment?: string | null;
+    azure_foundry_embed_model?: string | null;
+    azure_foundry_api_version?: string | null;
     cloudflare_account: string | null;
     cloudflare_chat_model: string;
     openai_key: string | null;
@@ -94,6 +141,19 @@ type LlmSummary = {
     openrouter_key: string | null;
     openrouter_chat_model: string;
     configured: boolean;
+    model_catalog: Record<
+        'cloudflare' | 'openai' | 'openrouter',
+        ModelCatalogEntry[]
+    >;
+    model_latencies: Record<
+        'cloudflare' | 'openai' | 'openrouter',
+        ModelLatency | null
+    >;
+    embed_catalog: Record<
+        'cloudflare' | 'openai' | 'openrouter',
+        EmbedCatalogEntry[]
+    >;
+    current_vector_dim: number;
 };
 
 type CacheSummary = {
@@ -121,6 +181,12 @@ type ReverbSummary = {
 
 type MarketingSummary = {
     customized: boolean;
+    agent_options?: Array<{ id: string; label: string }>;
+    theme_options?: Array<{
+        slug: string;
+        name: string;
+        description: string | null;
+    }>;
 };
 
 type PrivacySummary = {
@@ -147,11 +213,19 @@ type FormValues = {
     cloudflare_chat_model: string | null;
     cloudflare_embed_model: string | null;
     cloudflare_vectorize_index: string | null;
+    cloudflare_ai_gateway_url: string | null;
+    cloudflare_browser_rendering: boolean;
     openai_api_key_set: boolean;
     openai_chat_model: string | null;
     openai_embed_model: string | null;
     openrouter_api_key_set: boolean;
     openrouter_chat_model: string | null;
+    azure_foundry_enabled: boolean;
+    azure_foundry_endpoint: string | null;
+    azure_foundry_api_key_set: boolean;
+    azure_foundry_deployment: string | null;
+    azure_foundry_embed_model: string | null;
+    azure_foundry_api_version: string | null;
     llm_provider: string | null;
     vector_provider: string | null;
     mail_driver: string | null;
@@ -166,15 +240,46 @@ type FormValues = {
     header_logo_url: string | null;
     footer_logo_url: string | null;
     dashboard_logo_url: string | null;
+    header_logo_dark_url: string | null;
+    footer_logo_dark_url: string | null;
+    dashboard_logo_dark_url: string | null;
     favicon_url: string | null;
     header_brand_display: BrandDisplayMode;
     footer_brand_display: BrandDisplayMode;
     dashboard_brand_display: BrandDisplayMode;
     orbychat_brand_url: string | null;
+    auth_aside_eyebrow?: string;
+    auth_aside_heading?: string;
+    auth_aside_lede?: string;
+    auth_aside_bullets?: string[];
     orbychat_brand_label: string | null;
     marketing_site_enabled: boolean;
+    marketing_widget_enabled: boolean;
+    marketing_widget_agent_id: string | null;
+    marketing_theme: string;
     marketing_home_content: MarketingContentFormValue;
     privacy_policy_content: PrivacyPolicyFormValue;
+    pricing_faqs?: Array<{ q: string; a: string }>;
+    pricing_matrix?: Array<Record<string, unknown>>;
+    integrations_enabled?: {
+        slack?: boolean;
+        notion?: boolean;
+        google?: boolean;
+        webhooks?: boolean;
+        wordpress?: boolean;
+    };
+    integration_cards?: Array<{
+        key: string;
+        name: string;
+        category: string;
+        tagline: string;
+        description: string;
+    }>;
+    byok_enabled_globally: boolean;
+    admin_daily_digest_enabled: boolean;
+    require_email_verification: boolean;
+    wordpress_plugin_download_url?: string;
+    wordpress_plugin_help_text?: string;
 };
 
 type SettingsPage = 'system' | 'branding' | 'marketing' | 'privacy';
@@ -195,6 +300,9 @@ type CronWorkerSummary = {
     last_status_at: string | null;
     cloudflare_configured: boolean;
     callback_url: string;
+    // Health stats from cron_tick_logs (every-tick log written by
+    // QueueTickController). All optional so older Inertia payloads
+    // pre-deploy don't crash the new component.
     last_tick_at?: string | null;
     seconds_since_last_tick?: number | null;
     liveness?: 'live' | 'stale' | 'dead' | 'unknown';
@@ -228,6 +336,8 @@ type Props = {
 type TestResult = { ok: boolean; message: string } | null;
 
 function StatusPill({ configured }: { configured: boolean }) {
+    const { t } = useT();
+
     return (
         <span
             className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium tracking-wide uppercase ${
@@ -241,7 +351,7 @@ function StatusPill({ configured }: { configured: boolean }) {
             ) : (
                 <AlertCircle className="size-3" />
             )}
-            {configured ? __('configured') : __('missing')}
+            {configured ? t('configured') : t('missing')}
         </span>
     );
 }
@@ -282,14 +392,23 @@ function SectionShell({
 }: {
     icon: LucideIcon;
     title: string;
-    description: string;
+    description: string | React.ReactNode;
     statusPill?: React.ReactNode;
     testEndpoint?: string;
     testLabel?: string;
+    /**
+     * Optional second test button shown next to the primary one.
+     * Used by the Mail section to expose both a raw SMTP probe AND
+     * an end-to-end NewLeadCaptured-via-queue probe — buyer reports
+     * of "leads not arriving" trace back to either misconfigured
+     * mail OR a missing queue worker, and the two probes catch the
+     * different failure modes.
+     */
     secondaryTestEndpoint?: string;
     secondaryTestLabel?: string;
     children: React.ReactNode;
 }) {
+    const { t } = useT();
     const [runningPrimary, setRunningPrimary] = useState(false);
     const [runningSecondary, setRunningSecondary] = useState(false);
     const [result, setResult] = useState<TestResult>(null);
@@ -323,7 +442,9 @@ function SectionShell({
             setResult(
                 json ?? {
                     ok: false,
-                    message: `${__('Unexpected response')}: HTTP ${response.status}`,
+                    message: t('Unexpected response: HTTP :status', {
+                        status: response.status,
+                    }),
                 },
             );
         } catch (e) {
@@ -370,8 +491,8 @@ function SectionShell({
                                 <Loader2 className="size-3 animate-spin" />
                             ) : null}
                             {runningPrimary
-                                ? __('Testing…')
-                                : (testLabel ?? __('Run test'))}
+                                ? t('Testing…')
+                                : (testLabel ?? t('Run test'))}
                         </Button>
                     )}
                     {secondaryTestEndpoint && (
@@ -386,8 +507,9 @@ function SectionShell({
                                 <Loader2 className="size-3 animate-spin" />
                             ) : null}
                             {runningSecondary
-                                ? __('Testing…')
-                                : (secondaryTestLabel ?? __('Run secondary test'))}
+                                ? t('Testing…')
+                                : (secondaryTestLabel ??
+                                  t('Run secondary test'))}
                         </Button>
                     )}
                 </div>
@@ -464,6 +586,7 @@ function FaviconSurfacePreview({
     siteTitle: string;
     faviconUrl?: string | null;
 }) {
+    const { t } = useT();
     const initial = (siteTitle.trim().charAt(0) || 'S').toUpperCase();
 
     return (
@@ -474,10 +597,10 @@ function FaviconSurfacePreview({
                 </span>
                 <div className="min-w-0">
                     <p className="text-xs font-semibold text-foreground">
-                        {__('Browser tab')}
+                        {t('Browser tab')}
                     </p>
                     <p className="text-[11px] leading-5 text-muted-foreground">
-                        {__('Favicon + page title shell')}
+                        {t('Favicon + page title shell')}
                     </p>
                 </div>
             </div>
@@ -496,7 +619,7 @@ function FaviconSurfacePreview({
                         </span>
                     )}
                     <span className="truncate text-xs font-medium text-foreground">
-                        {siteTitle || __('Site title')}
+                        {siteTitle || t('Site title')}
                     </span>
                 </div>
             </div>
@@ -523,12 +646,18 @@ function useSelectedFilePreview(selectedFile: File | null): string | null {
     return previewUrl;
 }
 
+/**
+ * Dedicated input for sensitive fields. When the server reports the
+ * value is `_set`, the input shows a "•••• stored" placeholder until
+ * the admin starts typing — making it obvious that the secret is
+ * already stored without leaking it.
+ */
 function SecretInput({
     id,
     value,
     isSet,
     onChange,
-    placeholder = __('Leave blank to keep current'),
+    placeholder,
 }: {
     id: string;
     value: string;
@@ -536,6 +665,9 @@ function SecretInput({
     onChange: (v: string) => void;
     placeholder?: string;
 }) {
+    const { t } = useT();
+    const fallbackPlaceholder = placeholder ?? t('Leave blank to keep current');
+
     return (
         <Input
             id={id}
@@ -544,7 +676,9 @@ function SecretInput({
             spellCheck={false}
             value={value}
             placeholder={
-                isSet ? __('•••• stored — leave blank to keep') : placeholder
+                isSet
+                    ? t('•••• stored — leave blank to keep')
+                    : fallbackPlaceholder
             }
             onChange={(e) => onChange(e.target.value)}
         />
@@ -558,6 +692,7 @@ function StripeSection({
     summary: StripeSummary;
     initial: FormValues;
 }) {
+    const { t } = useT();
     const form = useForm<{
         stripe_key: string;
         stripe_secret: string;
@@ -578,14 +713,16 @@ function StripeSection({
     return (
         <SectionShell
             icon={CreditCard}
-            title={__('Stripe')}
-            description={__('Subscription billing, webhook signatures, and Cashier.')}
+            title={t('Stripe')}
+            description={t(
+                'Subscription billing, webhook signatures, and Cashier.',
+            )}
             statusPill={<StatusPill configured={summary.configured} />}
             testEndpoint="/settings/system/test/stripe"
         >
             <form onSubmit={submit} className="grid gap-3">
                 <div className="grid gap-1">
-                    <Label htmlFor="stripe_key">{__('Public key')}</Label>
+                    <Label htmlFor="stripe_key">{t('Public key')}</Label>
                     <Input
                         id="stripe_key"
                         autoComplete="off"
@@ -597,7 +734,7 @@ function StripeSection({
                     />
                 </div>
                 <div className="grid gap-1">
-                    <Label htmlFor="stripe_secret">{__('Secret key')}</Label>
+                    <Label htmlFor="stripe_secret">{t('Secret key')}</Label>
                     <SecretInput
                         id="stripe_secret"
                         value={form.data.stripe_secret}
@@ -608,7 +745,7 @@ function StripeSection({
                 </div>
                 <div className="grid gap-1">
                     <Label htmlFor="stripe_webhook_secret">
-                        {__('Webhook signing secret')}
+                        {t('Webhook signing secret')}
                     </Label>
                     <SecretInput
                         id="stripe_webhook_secret"
@@ -621,7 +758,7 @@ function StripeSection({
                     />
                 </div>
                 <div className="grid gap-1">
-                    <Label htmlFor="cashier_currency">{__('Currency')}</Label>
+                    <Label htmlFor="cashier_currency">{t('Currency')}</Label>
                     <Input
                         id="cashier_currency"
                         autoComplete="off"
@@ -634,7 +771,7 @@ function StripeSection({
                 </div>
                 <div className="flex justify-end">
                     <Button type="submit" disabled={form.processing}>
-                        {__('Save Stripe')}
+                        {t('Save Stripe')}
                     </Button>
                 </div>
             </form>
@@ -649,6 +786,7 @@ function PayPalSection({
     summary: PayPalSummary;
     initial: FormValues;
 }) {
+    const { t } = useT();
     const form = useForm<{
         paypal_mode: string;
         paypal_client_id: string;
@@ -669,14 +807,16 @@ function PayPalSection({
     return (
         <SectionShell
             icon={Wallet}
-            title={__('PayPal')}
-            description={__('Subscriptions via PayPal Billing Plans (sandbox or live mode).')}
+            title={t('PayPal')}
+            description={t(
+                'Subscriptions via PayPal Billing Plans (sandbox or live mode).',
+            )}
             statusPill={<StatusPill configured={summary.configured} />}
             testEndpoint="/settings/system/test/paypal"
         >
             <form onSubmit={submit} className="grid gap-3">
                 <div className="grid gap-1">
-                    <Label htmlFor="paypal_mode">{__('Mode')}</Label>
+                    <Label htmlFor="paypal_mode">{t('Mode')}</Label>
                     <Select
                         value={form.data.paypal_mode || 'sandbox'}
                         onValueChange={(v) => form.setData('paypal_mode', v)}
@@ -685,13 +825,15 @@ function PayPalSection({
                             <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
-                            <SelectItem value="sandbox">sandbox</SelectItem>
-                            <SelectItem value="live">live</SelectItem>
+                            <SelectItem value="sandbox">
+                                {t('sandbox')}
+                            </SelectItem>
+                            <SelectItem value="live">{t('live')}</SelectItem>
                         </SelectContent>
                     </Select>
                 </div>
                 <div className="grid gap-1">
-                    <Label htmlFor="paypal_client_id">{__('Client ID')}</Label>
+                    <Label htmlFor="paypal_client_id">{t('Client ID')}</Label>
                     <Input
                         id="paypal_client_id"
                         autoComplete="off"
@@ -703,7 +845,9 @@ function PayPalSection({
                     />
                 </div>
                 <div className="grid gap-1">
-                    <Label htmlFor="paypal_client_secret">{__('Client secret')}</Label>
+                    <Label htmlFor="paypal_client_secret">
+                        {t('Client secret')}
+                    </Label>
                     <SecretInput
                         id="paypal_client_secret"
                         value={form.data.paypal_client_secret}
@@ -715,7 +859,7 @@ function PayPalSection({
                     />
                 </div>
                 <div className="grid gap-1">
-                    <Label htmlFor="paypal_webhook_id">{__('Webhook ID')}</Label>
+                    <Label htmlFor="paypal_webhook_id">{t('Webhook ID')}</Label>
                     <Input
                         id="paypal_webhook_id"
                         autoComplete="off"
@@ -728,7 +872,7 @@ function PayPalSection({
                 </div>
                 <div className="flex justify-end">
                     <Button type="submit" disabled={form.processing}>
-                        {__('Save PayPal')}
+                        {t('Save PayPal')}
                     </Button>
                 </div>
             </form>
@@ -743,6 +887,7 @@ function RazorpaySection({
     summary: RazorpaySummary;
     initial: FormValues;
 }) {
+    const { t } = useT();
     const form = useForm<{
         razorpay_key_id: string;
         razorpay_key_secret: string;
@@ -761,14 +906,16 @@ function RazorpaySection({
     return (
         <SectionShell
             icon={Wallet}
-            title={__('Razorpay')}
-            description={__('Subscriptions via Razorpay Plans + Subscriptions API (UPI, cards, netbanking).')}
+            title={t('Razorpay')}
+            description={t(
+                'Subscriptions via Razorpay Plans + Subscriptions API (UPI, cards, netbanking).',
+            )}
             statusPill={<StatusPill configured={summary.configured} />}
             testEndpoint="/settings/system/test/razorpay"
         >
             <form onSubmit={submit} className="grid gap-3">
                 <div className="grid gap-1">
-                    <Label htmlFor="razorpay_key_id">{__('Key ID')}</Label>
+                    <Label htmlFor="razorpay_key_id">{t('Key ID')}</Label>
                     <Input
                         id="razorpay_key_id"
                         autoComplete="off"
@@ -780,18 +927,20 @@ function RazorpaySection({
                     />
                 </div>
                 <div className="grid gap-1">
-                    <Label htmlFor="razorpay_key_secret">{__('Key secret')}</Label>
+                    <Label htmlFor="razorpay_key_secret">
+                        {t('Key secret')}
+                    </Label>
                     <SecretInput
                         id="razorpay_key_secret"
                         value={form.data.razorpay_key_secret}
                         isSet={initial.razorpay_key_secret_set}
                         onChange={(v) => form.setData('razorpay_key_secret', v)}
-                        placeholder={__('Key secret from dashboard')}
+                        placeholder={t('Key secret from dashboard')}
                     />
                 </div>
                 <div className="grid gap-1">
                     <Label htmlFor="razorpay_webhook_secret">
-                        {__('Webhook secret')}
+                        {t('Webhook secret')}
                     </Label>
                     <SecretInput
                         id="razorpay_webhook_secret"
@@ -800,12 +949,12 @@ function RazorpaySection({
                         onChange={(v) =>
                             form.setData('razorpay_webhook_secret', v)
                         }
-                        placeholder={__('Webhook signing secret')}
+                        placeholder={t('Webhook signing secret')}
                     />
                 </div>
                 <div className="flex justify-end">
                     <Button type="submit" disabled={form.processing}>
-                        {__('Save Razorpay')}
+                        {t('Save Razorpay')}
                     </Button>
                 </div>
             </form>
@@ -814,6 +963,7 @@ function RazorpaySection({
 }
 
 function GatewayTogglesSection({ initial }: { initial: FormValues }) {
+    const { t } = useT();
     const form = useForm<{
         stripe_enabled: boolean;
         paypal_enabled: boolean;
@@ -845,8 +995,10 @@ function GatewayTogglesSection({ initial }: { initial: FormValues }) {
     return (
         <SectionShell
             icon={ToggleRight}
-            title={__('Payment gateways')}
-            description={__('Enable or disable each gateway. Disabled gateways never appear on the customer billing page, even when credentials are configured.')}
+            title={t('Payment gateways')}
+            description={t(
+                'Enable or disable each gateway. Disabled gateways never appear on the customer billing page, even when credentials are configured.',
+            )}
         >
             <form onSubmit={submit} className="grid gap-3">
                 <div className="grid gap-2 sm:grid-cols-3">
@@ -856,7 +1008,7 @@ function GatewayTogglesSection({ initial }: { initial: FormValues }) {
                 </div>
                 <div className="flex justify-end">
                     <Button type="submit" disabled={form.processing}>
-                        {__('Save gateway toggles')}
+                        {t('Save gateway toggles')}
                     </Button>
                 </div>
             </form>
@@ -871,18 +1023,24 @@ function CloudflareSection({
     summary: LlmSummary;
     initial: FormValues;
 }) {
+    const { t } = useT();
     const form = useForm<{
         cloudflare_account_id: string;
         cloudflare_api_token: string;
         cloudflare_chat_model: string;
         cloudflare_embed_model: string;
         cloudflare_vectorize_index: string;
+        cloudflare_ai_gateway_url: string;
+        cloudflare_browser_rendering: boolean;
     }>({
         cloudflare_account_id: initial.cloudflare_account_id ?? '',
         cloudflare_api_token: '',
         cloudflare_chat_model: initial.cloudflare_chat_model ?? '',
         cloudflare_embed_model: initial.cloudflare_embed_model ?? '',
         cloudflare_vectorize_index: initial.cloudflare_vectorize_index ?? '',
+        cloudflare_ai_gateway_url: initial.cloudflare_ai_gateway_url ?? '',
+        cloudflare_browser_rendering:
+            initial.cloudflare_browser_rendering ?? true,
     });
 
     const submit = (e: React.FormEvent) => {
@@ -893,15 +1051,105 @@ function CloudflareSection({
     return (
         <SectionShell
             icon={Sparkles}
-            title={__('Cloudflare (Workers AI + Vectorize)')}
-            description={__('Default chat / embed / vector provider when keys are present.')}
+            title={t('Cloudflare (Workers AI + Vectorize)')}
+            description={
+                <>
+                    {t(
+                        'Default chat / embed / vector provider when keys are present. Cloudflare bills your account directly —',
+                    )}{' '}
+                    <a
+                        href="/documentation/cloudflare-costs"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="font-semibold underline-offset-2 hover:underline"
+                    >
+                        {t('what does this cost?')}
+                    </a>
+                </>
+            }
             statusPill={
                 <StatusPill configured={summary.resolved === 'cloudflare'} />
             }
         >
             <form onSubmit={submit} className="grid gap-3">
+                <div className="rounded-md border border-amber-300/30 bg-amber-50/40 p-3 text-xs leading-5 text-amber-900 dark:border-amber-500/20 dark:bg-amber-500/5 dark:text-amber-200">
+                    <p className="font-semibold">
+                        {t('Required token permissions')}
+                    </p>
+                    <p className="mt-1">
+                        {t(
+                            'Create the token at My Profile → API Tokens → Create Token → Get started → Create Custom Token. Add ALL of these account-scoped permissions or some features will silently break:',
+                        )}
+                    </p>
+                    <ul className="ms-4 mt-2 list-disc space-y-0.5">
+                        <li>
+                            <span className="font-mono text-[11px]">
+                                Account → Workers AI → Read
+                            </span>{' '}
+                            —{' '}
+                            {t(
+                                'chat completion + embedding (bge-base-en-v1.5).',
+                            )}
+                        </li>
+                        <li>
+                            <span className="font-mono text-[11px]">
+                                Account → Vectorize → Edit
+                            </span>{' '}
+                            —{' '}
+                            {t(
+                                'creates the chunks index on first run, upserts vectors, queries on every visitor message.',
+                            )}
+                        </li>
+                        <li>
+                            <span className="font-mono text-[11px]">
+                                Account → Browser Rendering → Edit
+                            </span>{' '}
+                            —{' '}
+                            {t(
+                                'JS-rendered crawl of customer sites (Shopify, Next.js, Vue, SPA pages).',
+                            )}
+                        </li>
+                        <li>
+                            <span className="font-mono text-[11px]">
+                                Account → Workers R2 Storage → Edit
+                            </span>{' '}
+                            —{' '}
+                            {t(
+                                'optional, only if you store assets (logos, uploaded source PDFs) in R2.',
+                            )}
+                        </li>
+                        <li>
+                            <span className="font-mono text-[11px]">
+                                Account → Workers Scripts → Edit
+                            </span>{' '}
+                            —{' '}
+                            {t(
+                                'lets the "Deploy Cron Worker" button push the queue-tick Worker for you.',
+                            )}
+                        </li>
+                    </ul>
+                    <p className="mt-2">
+                        <strong>{t('Resources scope:')}</strong>{' '}
+                        {t(
+                            'set "Include — All accounts" OR pick the specific account whose ID you paste below. Mismatched account = code 10000 "Authentication error" on every Vectorize call.',
+                        )}
+                    </p>
+                    <p className="mt-2">
+                        <a
+                            href="/documentation/cloudflare-costs"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="font-semibold underline-offset-2 hover:underline"
+                        >
+                            {t('Full setup guide →')}
+                        </a>
+                    </p>
+                </div>
+
                 <div className="grid gap-1">
-                    <Label htmlFor="cloudflare_account_id">{__('Account ID')}</Label>
+                    <Label htmlFor="cloudflare_account_id">
+                        {t('Account ID')}
+                    </Label>
                     <Input
                         id="cloudflare_account_id"
                         autoComplete="off"
@@ -913,9 +1161,16 @@ function CloudflareSection({
                             )
                         }
                     />
+                    <p className="text-[11px] text-muted-foreground">
+                        {t(
+                            'Find it on the right sidebar of the Cloudflare dashboard home (32-character hex string).',
+                        )}
+                    </p>
                 </div>
                 <div className="grid gap-1">
-                    <Label htmlFor="cloudflare_api_token">{__('API token')}</Label>
+                    <Label htmlFor="cloudflare_api_token">
+                        {t('API token')}
+                    </Label>
                     <SecretInput
                         id="cloudflare_api_token"
                         value={form.data.cloudflare_api_token}
@@ -924,46 +1179,43 @@ function CloudflareSection({
                             form.setData('cloudflare_api_token', v)
                         }
                     />
+                    <p className="text-[11px] text-muted-foreground">
+                        {t(
+                            'Token from My Profile → API Tokens with the permissions listed above. Starts with a long alphanumeric string; treat as a password.',
+                        )}
+                    </p>
                 </div>
-                <div className="grid gap-3 sm:grid-cols-2">
-                    <div className="grid gap-1">
-                        <Label htmlFor="cloudflare_chat_model">
-                            {__('Chat model')}
-                        </Label>
-                        <Input
-                            id="cloudflare_chat_model"
-                            autoComplete="off"
-                            value={form.data.cloudflare_chat_model}
-                            onChange={(e) =>
-                                form.setData(
-                                    'cloudflare_chat_model',
-                                    e.target.value,
-                                )
-                            }
-                            placeholder="@cf/meta/llama-3.3-70b-instruct-fp8-fast"
-                        />
-                    </div>
-                    <div className="grid gap-1">
-                        <Label htmlFor="cloudflare_embed_model">
-                            {__('Embed model')}
-                        </Label>
-                        <Input
-                            id="cloudflare_embed_model"
-                            autoComplete="off"
-                            value={form.data.cloudflare_embed_model}
-                            onChange={(e) =>
-                                form.setData(
-                                    'cloudflare_embed_model',
-                                    e.target.value,
-                                )
-                            }
-                            placeholder="@cf/baai/bge-base-en-v1.5"
-                        />
-                    </div>
+                <div className="grid gap-3">
+                    <ModelPicker
+                        id="cloudflare_chat_model"
+                        label={t('Chat model')}
+                        provider="cloudflare"
+                        value={form.data.cloudflare_chat_model}
+                        onChange={(v) =>
+                            form.setData('cloudflare_chat_model', v)
+                        }
+                        catalog={summary.model_catalog.cloudflare}
+                        initialLatency={summary.model_latencies.cloudflare}
+                        placeholder="@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+                        helpText={t(
+                            'Click "Test connection" to measure the real time-to-first-token from this server.',
+                        )}
+                    />
+                    <EmbedModelPicker
+                        id="cloudflare_embed_model"
+                        label={t('Embed model')}
+                        value={form.data.cloudflare_embed_model}
+                        onChange={(v) =>
+                            form.setData('cloudflare_embed_model', v)
+                        }
+                        catalog={summary.embed_catalog.cloudflare}
+                        currentVectorDim={summary.current_vector_dim}
+                        placeholder="@cf/baai/bge-base-en-v1.5"
+                    />
                 </div>
                 <div className="grid gap-1">
                     <Label htmlFor="cloudflare_vectorize_index">
-                        {__('Vectorize index')}
+                        {t('Vectorize index')}
                     </Label>
                     <Input
                         id="cloudflare_vectorize_index"
@@ -978,9 +1230,54 @@ function CloudflareSection({
                         placeholder="orbychat-chunks"
                     />
                 </div>
+                <div className="grid gap-1">
+                    <Label htmlFor="cloudflare_ai_gateway_url">
+                        {t('AI Gateway URL (optional)')}
+                    </Label>
+                    <Input
+                        id="cloudflare_ai_gateway_url"
+                        type="url"
+                        autoComplete="off"
+                        value={form.data.cloudflare_ai_gateway_url}
+                        onChange={(e) =>
+                            form.setData(
+                                'cloudflare_ai_gateway_url',
+                                e.target.value,
+                            )
+                        }
+                        placeholder="https://gateway.ai.cloudflare.com/v1/<account>/<gateway>"
+                    />
+                    <p className="text-xs text-muted-foreground">
+                        {t(
+                            'Route Workers AI calls through Cloudflare AI Gateway for observability + caching. Leave blank to call Workers AI directly.',
+                        )}
+                    </p>
+                </div>
+                <label className="flex cursor-pointer items-center justify-between rounded border border-border p-3 text-sm">
+                    <span>
+                        {t(
+                            'Use Cloudflare Browser Rendering for crawled pages',
+                        )}
+                        <span className="ml-2 text-xs text-muted-foreground">
+                            {t(
+                                '(falls back to Browserless / plain HTTP when disabled)',
+                            )}
+                        </span>
+                    </span>
+                    <input
+                        type="checkbox"
+                        checked={form.data.cloudflare_browser_rendering}
+                        onChange={(e) =>
+                            form.setData(
+                                'cloudflare_browser_rendering',
+                                e.target.checked,
+                            )
+                        }
+                    />
+                </label>
                 <div className="flex justify-end">
                     <Button type="submit" disabled={form.processing}>
-                        {__('Save Cloudflare')}
+                        {t('Save Cloudflare')}
                     </Button>
                 </div>
             </form>
@@ -988,7 +1285,14 @@ function CloudflareSection({
     );
 }
 
-function OpenAiSection({ initial }: { initial: FormValues }) {
+function OpenAiSection({
+    summary,
+    initial,
+}: {
+    summary: LlmSummary;
+    initial: FormValues;
+}) {
+    const { t } = useT();
     const form = useForm<{
         openai_api_key: string;
         openai_chat_model: string;
@@ -1007,13 +1311,15 @@ function OpenAiSection({ initial }: { initial: FormValues }) {
     return (
         <SectionShell
             icon={Sparkles}
-            title={__('OpenAI')}
-            description={__('Fallback / quality-bump for chat + embed fallback when CF embed fails.')}
+            title={t('OpenAI')}
+            description={t(
+                'Fallback / quality-bump for chat + embed fallback when CF embed fails.',
+            )}
             statusPill={<StatusPill configured={initial.openai_api_key_set} />}
         >
             <form onSubmit={submit} className="grid gap-3">
                 <div className="grid gap-1">
-                    <Label htmlFor="openai_api_key">{__('API key')}</Label>
+                    <Label htmlFor="openai_api_key">{t('API key')}</Label>
                     <SecretInput
                         id="openai_api_key"
                         value={form.data.openai_api_key}
@@ -1022,41 +1328,33 @@ function OpenAiSection({ initial }: { initial: FormValues }) {
                         placeholder="sk-…"
                     />
                 </div>
-                <div className="grid gap-3 sm:grid-cols-2">
-                    <div className="grid gap-1">
-                        <Label htmlFor="openai_chat_model">{__('Chat model')}</Label>
-                        <Input
-                            id="openai_chat_model"
-                            autoComplete="off"
-                            value={form.data.openai_chat_model}
-                            onChange={(e) =>
-                                form.setData(
-                                    'openai_chat_model',
-                                    e.target.value,
-                                )
-                            }
-                            placeholder="gpt-4o-mini"
-                        />
-                    </div>
-                    <div className="grid gap-1">
-                        <Label htmlFor="openai_embed_model">{__('Embed model')}</Label>
-                        <Input
-                            id="openai_embed_model"
-                            autoComplete="off"
-                            value={form.data.openai_embed_model}
-                            onChange={(e) =>
-                                form.setData(
-                                    'openai_embed_model',
-                                    e.target.value,
-                                )
-                            }
-                            placeholder="text-embedding-3-small"
-                        />
-                    </div>
+                <div className="grid gap-3">
+                    <ModelPicker
+                        id="openai_chat_model"
+                        label={t('Chat model')}
+                        provider="openai"
+                        value={form.data.openai_chat_model}
+                        onChange={(v) => form.setData('openai_chat_model', v)}
+                        catalog={summary.model_catalog.openai}
+                        initialLatency={summary.model_latencies.openai}
+                        placeholder="gpt-4o-mini"
+                        helpText={t(
+                            'Click "Test connection" to measure the real time-to-first-token from this server.',
+                        )}
+                    />
+                    <EmbedModelPicker
+                        id="openai_embed_model"
+                        label={t('Embed model')}
+                        value={form.data.openai_embed_model}
+                        onChange={(v) => form.setData('openai_embed_model', v)}
+                        catalog={summary.embed_catalog.openai}
+                        currentVectorDim={summary.current_vector_dim}
+                        placeholder="text-embedding-3-small"
+                    />
                 </div>
                 <div className="flex justify-end">
                     <Button type="submit" disabled={form.processing}>
-                        {__('Save OpenAI')}
+                        {t('Save OpenAI')}
                     </Button>
                 </div>
             </form>
@@ -1064,7 +1362,14 @@ function OpenAiSection({ initial }: { initial: FormValues }) {
     );
 }
 
-function OpenRouterSection({ initial }: { initial: FormValues }) {
+function OpenRouterSection({
+    summary,
+    initial,
+}: {
+    summary: LlmSummary;
+    initial: FormValues;
+}) {
+    const { t } = useT();
     const form = useForm<{
         openrouter_api_key: string;
         openrouter_chat_model: string;
@@ -1081,15 +1386,17 @@ function OpenRouterSection({ initial }: { initial: FormValues }) {
     return (
         <SectionShell
             icon={Sparkles}
-            title={__('OpenRouter')}
-            description={__('Free-tier chat models. Only used when LLM_PROVIDER is set to openrouter explicitly.')}
+            title={t('OpenRouter')}
+            description={t(
+                'Free-tier chat models. Only used when LLM_PROVIDER is set to openrouter explicitly.',
+            )}
             statusPill={
                 <StatusPill configured={initial.openrouter_api_key_set} />
             }
         >
             <form onSubmit={submit} className="grid gap-3">
                 <div className="grid gap-1">
-                    <Label htmlFor="openrouter_api_key">{__('API key')}</Label>
+                    <Label htmlFor="openrouter_api_key">{t('API key')}</Label>
                     <SecretInput
                         id="openrouter_api_key"
                         value={form.data.openrouter_api_key}
@@ -1098,24 +1405,175 @@ function OpenRouterSection({ initial }: { initial: FormValues }) {
                         placeholder="sk-or-…"
                     />
                 </div>
-                <div className="grid gap-1">
-                    <Label htmlFor="openrouter_chat_model">{__('Chat model')}</Label>
-                    <Input
-                        id="openrouter_chat_model"
-                        autoComplete="off"
-                        value={form.data.openrouter_chat_model}
-                        onChange={(e) =>
-                            form.setData(
-                                'openrouter_chat_model',
-                                e.target.value,
-                            )
-                        }
-                        placeholder="meta-llama/llama-3.3-70b-instruct:free"
-                    />
-                </div>
+                <ModelPicker
+                    id="openrouter_chat_model"
+                    label={t('Chat model')}
+                    provider="openrouter"
+                    value={form.data.openrouter_chat_model}
+                    onChange={(v) => form.setData('openrouter_chat_model', v)}
+                    catalog={summary.model_catalog.openrouter}
+                    initialLatency={summary.model_latencies.openrouter}
+                    placeholder="meta-llama/llama-3.3-70b-instruct:free"
+                    helpText={t(
+                        'Click "Test connection" to measure the real time-to-first-token from this server.',
+                    )}
+                />
                 <div className="flex justify-end">
                     <Button type="submit" disabled={form.processing}>
-                        {__('Save OpenRouter')}
+                        {t('Save OpenRouter')}
+                    </Button>
+                </div>
+            </form>
+        </SectionShell>
+    );
+}
+
+function AzureFoundrySection({
+    summary,
+    initial,
+}: {
+    summary: LlmSummary;
+    initial: FormValues;
+}) {
+    const { t } = useT();
+    const form = useForm<{
+        azure_foundry_enabled: boolean;
+        azure_foundry_endpoint: string;
+        azure_foundry_api_key: string;
+        azure_foundry_deployment: string;
+        azure_foundry_embed_model: string;
+        azure_foundry_api_version: string;
+    }>({
+        azure_foundry_enabled: initial.azure_foundry_enabled ?? false,
+        azure_foundry_endpoint: initial.azure_foundry_endpoint ?? '',
+        azure_foundry_api_key: '',
+        azure_foundry_deployment: initial.azure_foundry_deployment ?? 'gpt-4o',
+        azure_foundry_embed_model: initial.azure_foundry_embed_model ?? 'text-embedding-3-small',
+        azure_foundry_api_version: initial.azure_foundry_api_version ?? '2024-06-01',
+    });
+
+    const submit = (e: React.FormEvent) => {
+        e.preventDefault();
+        form.patch('/settings/system/azure_foundry', { preserveScroll: true });
+    };
+
+    const isConfigured = initial.azure_foundry_api_key_set && !!initial.azure_foundry_endpoint;
+
+    return (
+        <SectionShell
+            icon={Sparkles}
+            title={t('Azure AI Foundry')}
+            description={t(
+                'Azure OpenAI & Azure AI Foundry Model Inference (DeepSeek, Llama, Mistral, GPT-4o). Açıldığında sistem doğrudan Foundry modelini kullanır, kapatıldığında mevcut sağlayıcılara (Cloudflare/OpenAI) geri döner.',
+            )}
+            statusPill={
+                <div className="flex items-center gap-2">
+                    {form.data.azure_foundry_enabled ? (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-medium tracking-wide uppercase text-emerald-700 dark:text-emerald-400">
+                            <CheckCircle2 className="size-3" />
+                            {t('Aktif')}
+                        </span>
+                    ) : (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium tracking-wide uppercase text-muted-foreground">
+                            {t('Kapalı')}
+                        </span>
+                    )}
+                    <StatusPill configured={isConfigured} />
+                </div>
+            }
+            testEndpoint="/settings/system/test/azure-foundry"
+            testLabel={t('Test connection')}
+        >
+            <form onSubmit={submit} className="grid gap-4">
+                <div className="flex items-center justify-between rounded-lg border bg-muted/30 p-3">
+                    <div className="space-y-0.5">
+                        <Label htmlFor="azure_foundry_enabled" className="text-sm font-medium">
+                            {t('Azure AI Foundry Entegrasyonu')}
+                        </Label>
+                        <p className="text-xs text-muted-foreground">
+                            {t('Açık olduğunda tüm yapay zeka istekleri Azure Foundry üzerinden işlenir. Kapalıyken mevcut API’ler devreye girer.')}
+                        </p>
+                    </div>
+                    <label className="relative inline-flex cursor-pointer items-center">
+                        <input
+                            type="checkbox"
+                            id="azure_foundry_enabled"
+                            checked={form.data.azure_foundry_enabled}
+                            onChange={(e) => form.setData('azure_foundry_enabled', e.target.checked)}
+                            className="peer sr-only"
+                        />
+                        <div className="peer h-6 w-11 rounded-full bg-input after:absolute after:top-[2px] after:start-[2px] after:h-5 after:w-5 after:rounded-full after:bg-white after:transition-all after:content-[''] peer-checked:bg-emerald-600 peer-checked:after:translate-x-full peer-focus:outline-none"></div>
+                    </label>
+                </div>
+
+                <div className="grid gap-3 sm:grid-cols-2">
+                    <div className="grid gap-1 sm:col-span-2">
+                        <Label htmlFor="azure_foundry_endpoint">{t('Endpoint URL')}</Label>
+                        <Input
+                            id="azure_foundry_endpoint"
+                            value={form.data.azure_foundry_endpoint}
+                            onChange={(e) => form.setData('azure_foundry_endpoint', e.target.value)}
+                            placeholder="https://your-resource.openai.azure.com/ veya https://your-resource.models.ai.azure.com"
+                        />
+                        <p className="text-[11px] text-muted-foreground">
+                            {t('Azure AI Foundry kaynak URL’si (Azure OpenAI endpoint’i veya Serverless Model Inference URL).')}
+                        </p>
+                    </div>
+
+                    <div className="grid gap-1 sm:col-span-2">
+                        <Label htmlFor="azure_foundry_api_key">{t('API Key')}</Label>
+                        <SecretInput
+                            id="azure_foundry_api_key"
+                            value={form.data.azure_foundry_api_key}
+                            isSet={initial.azure_foundry_api_key_set}
+                            onChange={(v) => form.setData('azure_foundry_api_key', v)}
+                            placeholder="Azure API Key..."
+                        />
+                    </div>
+
+                    <div className="grid gap-1">
+                        <Label htmlFor="azure_foundry_deployment">{t('Chat Model / Deployment Adı')}</Label>
+                        <Input
+                            id="azure_foundry_deployment"
+                            value={form.data.azure_foundry_deployment}
+                            onChange={(e) => form.setData('azure_foundry_deployment', e.target.value)}
+                            placeholder="gpt-4o"
+                        />
+                        <p className="text-[11px] text-muted-foreground">
+                            {t('Azure portalda dağıttığınız model/deployment adı (ör. gpt-4o, DeepSeek-R1).')}
+                        </p>
+                    </div>
+
+                    <div className="grid gap-1">
+                        <Label htmlFor="azure_foundry_embed_model">{t('Embedding Model (Opsiyonel)')}</Label>
+                        <Input
+                            id="azure_foundry_embed_model"
+                            value={form.data.azure_foundry_embed_model}
+                            onChange={(e) => form.setData('azure_foundry_embed_model', e.target.value)}
+                            placeholder="text-embedding-3-small"
+                        />
+                        <p className="text-[11px] text-muted-foreground">
+                            {t('RAG ve vektör indeksleme için embedding dağıtımı adı.')}
+                        </p>
+                    </div>
+
+                    <div className="grid gap-1 sm:col-span-2">
+                        <Label htmlFor="azure_foundry_api_version">{t('API Versiyonu (Opsiyonel)')}</Label>
+                        <Input
+                            id="azure_foundry_api_version"
+                            value={form.data.azure_foundry_api_version}
+                            onChange={(e) => form.setData('azure_foundry_api_version', e.target.value)}
+                            placeholder="2024-06-01"
+                        />
+                        <p className="text-[11px] text-muted-foreground">
+                            {t('Azure OpenAI için geçerli API sürümü (varsayılan: 2024-06-01).')}
+                        </p>
+                    </div>
+                </div>
+
+                <div className="flex justify-end">
+                    <Button type="submit" disabled={form.processing}>
+                        {t('Save Azure AI Foundry')}
                     </Button>
                 </div>
             </form>
@@ -1124,6 +1582,7 @@ function OpenRouterSection({ initial }: { initial: FormValues }) {
 }
 
 function RoutingSection({ initial }: { initial: FormValues }) {
+    const { t } = useT();
     const form = useForm<{
         llm_provider: string;
         vector_provider: string;
@@ -1140,8 +1599,10 @@ function RoutingSection({ initial }: { initial: FormValues }) {
     return (
         <SectionShell
             icon={RouteIcon}
-            title={__('Provider routing')}
-            description={__('Force a specific LLM or vector provider. Leave blank to auto-pick from configured keys.')}
+            title={t('Provider routing')}
+            description={t(
+                'Force a specific LLM or vector provider. Leave blank to auto-pick from configured keys.',
+            )}
         >
             <form onSubmit={submit} className="grid gap-3">
                 <div className="grid gap-3 sm:grid-cols-2">
@@ -1161,7 +1622,10 @@ function RoutingSection({ initial }: { initial: FormValues }) {
                             </SelectTrigger>
                             <SelectContent>
                                 <SelectItem value="auto">
-                                    {__('auto (from keys)')}
+                                    {t('auto (from keys)')}
+                                </SelectItem>
+                                <SelectItem value="azure_foundry">
+                                    azure_foundry
                                 </SelectItem>
                                 <SelectItem value="cloudflare">
                                     cloudflare
@@ -1189,7 +1653,7 @@ function RoutingSection({ initial }: { initial: FormValues }) {
                             </SelectTrigger>
                             <SelectContent>
                                 <SelectItem value="auto">
-                                    {__('auto (from keys)')}
+                                    {t('auto (from keys)')}
                                 </SelectItem>
                                 <SelectItem value="cloudflare">
                                     cloudflare
@@ -1201,7 +1665,223 @@ function RoutingSection({ initial }: { initial: FormValues }) {
                 </div>
                 <div className="flex justify-end">
                     <Button type="submit" disabled={form.processing}>
-                        {__('Save routing')}
+                        {t('Save routing')}
+                    </Button>
+                </div>
+            </form>
+        </SectionShell>
+    );
+}
+
+function AdminDigestSection({ initial }: { initial: FormValues }) {
+    const { t } = useT();
+    const form = useForm<{ admin_daily_digest_enabled: boolean }>({
+        admin_daily_digest_enabled: initial.admin_daily_digest_enabled ?? false,
+    });
+
+    const submit = (e: React.FormEvent) => {
+        e.preventDefault();
+        form.patch('/settings/system/notifications', { preserveScroll: true });
+    };
+
+    return (
+        <SectionShell
+            icon={Sparkles}
+            title={t('Daily admin digest')}
+            description={t(
+                'Email every super_admin a 24-hour summary of new users, new paid subscriptions, new workspaces, and new leads captured platform-wide. The summary is sent at 09:00 UTC every day via the scheduled command admin:send-daily-digest. Disable to stop the emails — opt-in by default.',
+            )}
+        >
+            <form onSubmit={submit} className="grid gap-3">
+                <label className="flex cursor-pointer items-center justify-between rounded border border-border p-3 text-sm">
+                    <span>
+                        {t('Send a daily summary email to every super_admin')}
+                    </span>
+                    <input
+                        type="checkbox"
+                        checked={form.data.admin_daily_digest_enabled}
+                        onChange={(e) =>
+                            form.setData(
+                                'admin_daily_digest_enabled',
+                                e.target.checked,
+                            )
+                        }
+                    />
+                </label>
+                <div className="flex justify-end">
+                    <Button type="submit" disabled={form.processing}>
+                        {t('Save digest preference')}
+                    </Button>
+                </div>
+            </form>
+        </SectionShell>
+    );
+}
+
+function WordpressPluginSection({ initial }: { initial: FormValues }) {
+    const { t } = useT();
+    const form = useForm<{
+        wordpress_plugin_download_url: string;
+        wordpress_plugin_help_text: string;
+    }>({
+        wordpress_plugin_download_url:
+            initial.wordpress_plugin_download_url ?? '',
+        wordpress_plugin_help_text: initial.wordpress_plugin_help_text ?? '',
+    });
+
+    const submit = (e: React.FormEvent) => {
+        e.preventDefault();
+        form.patch('/settings/system/wordpress_plugin', {
+            preserveScroll: true,
+        });
+    };
+
+    return (
+        <SectionShell
+            icon={Sparkles}
+            title={t('WordPress plugin distribution')}
+            description={t(
+                "Override the help blurb + download link shown on every workspace's Integrations → WordPress card. Leave blank to keep the default text. Use the URL field to point customers to your own plugin mirror (WordPress.org listing, S3 bucket, marketing site, etc.).",
+            )}
+        >
+            <form onSubmit={submit} className="grid gap-3">
+                <div className="grid gap-1.5">
+                    <Label htmlFor="wp-plugin-url">{t('Download URL')}</Label>
+                    <input
+                        id="wp-plugin-url"
+                        type="url"
+                        placeholder="https://yourdomain.com/plugin/orbychat.zip"
+                        value={form.data.wordpress_plugin_download_url}
+                        onChange={(e) =>
+                            form.setData(
+                                'wordpress_plugin_download_url',
+                                e.target.value,
+                            )
+                        }
+                        className="rounded border border-border bg-background px-3 py-2 text-sm"
+                    />
+                    {form.errors.wordpress_plugin_download_url && (
+                        <p className="text-xs text-destructive">
+                            {form.errors.wordpress_plugin_download_url}
+                        </p>
+                    )}
+                </div>
+                <div className="grid gap-1.5">
+                    <Label htmlFor="wp-plugin-text">{t('Help text')}</Label>
+                    <textarea
+                        id="wp-plugin-text"
+                        rows={3}
+                        placeholder={t(
+                            'Need the plugin? Download it below, or read the setup guide:',
+                        )}
+                        value={form.data.wordpress_plugin_help_text}
+                        onChange={(e) =>
+                            form.setData(
+                                'wordpress_plugin_help_text',
+                                e.target.value,
+                            )
+                        }
+                        className="rounded border border-border bg-background px-3 py-2 text-sm"
+                    />
+                    {form.errors.wordpress_plugin_help_text && (
+                        <p className="text-xs text-destructive">
+                            {form.errors.wordpress_plugin_help_text}
+                        </p>
+                    )}
+                </div>
+                <div className="flex justify-end">
+                    <Button type="submit" disabled={form.processing}>
+                        {t('Save plugin link')}
+                    </Button>
+                </div>
+            </form>
+        </SectionShell>
+    );
+}
+
+function SignupVerificationSection({ initial }: { initial: FormValues }) {
+    const { t } = useT();
+    const form = useForm<{ require_email_verification: boolean }>({
+        require_email_verification: initial.require_email_verification ?? false,
+    });
+
+    const submit = (e: React.FormEvent) => {
+        e.preventDefault();
+        form.patch('/settings/system/signup', { preserveScroll: true });
+    };
+
+    return (
+        <SectionShell
+            icon={Sparkles}
+            title={t('Email verification on signup')}
+            description={t(
+                'When enabled, new users must click a verification link emailed to them before they can sign in. When disabled, signups are auto-verified and can log in immediately. Most B2B SaaS keeps this off so the very first signup-to-magic-moment funnel is friction-free.',
+            )}
+        >
+            <form onSubmit={submit} className="grid gap-3">
+                <label className="flex cursor-pointer items-center justify-between rounded border border-border p-3 text-sm">
+                    <span>
+                        {t('Require email verification before first login')}
+                    </span>
+                    <input
+                        type="checkbox"
+                        checked={form.data.require_email_verification}
+                        onChange={(e) =>
+                            form.setData(
+                                'require_email_verification',
+                                e.target.checked,
+                            )
+                        }
+                    />
+                </label>
+                <div className="flex justify-end">
+                    <Button type="submit" disabled={form.processing}>
+                        {t('Save signup setting')}
+                    </Button>
+                </div>
+            </form>
+        </SectionShell>
+    );
+}
+
+function ByokGlobalSection({ initial }: { initial: FormValues }) {
+    const { t } = useT();
+    const form = useForm<{ byok_enabled_globally: boolean }>({
+        byok_enabled_globally: initial.byok_enabled_globally,
+    });
+
+    const submit = (e: React.FormEvent) => {
+        e.preventDefault();
+        form.patch('/settings/system/byok', { preserveScroll: true });
+    };
+
+    return (
+        <SectionShell
+            icon={Sparkles}
+            title={t('Bring Your Own Keys (BYOK)')}
+            description={t(
+                'When enabled, every workspace must supply its own Cloudflare / OpenAI / OpenRouter / Qdrant credentials in Settings → BYOK Keys. The platform keys configured above will not resolve for any tenant. Per-user overrides on the /admin/users page still apply.',
+            )}
+        >
+            <form onSubmit={submit} className="grid gap-3">
+                <label className="flex cursor-pointer items-center justify-between rounded border border-border p-3 text-sm">
+                    <span>
+                        {t('Force every workspace to use their own AI keys')}
+                    </span>
+                    <input
+                        type="checkbox"
+                        checked={form.data.byok_enabled_globally}
+                        onChange={(e) =>
+                            form.setData(
+                                'byok_enabled_globally',
+                                e.target.checked,
+                            )
+                        }
+                    />
+                </label>
+                <div className="flex justify-end">
+                    <Button type="submit" disabled={form.processing}>
+                        {t('Save BYOK gate')}
                     </Button>
                 </div>
             </form>
@@ -1216,6 +1896,9 @@ function MailSection({
     summary: MailSummary;
     initial: FormValues;
 }) {
+    const { t } = useT();
+    const branding = useBranding();
+    const brand = branding.site_title || 'Orby';
     const form = useForm<{
         mail_driver: string;
         mail_host: string;
@@ -1244,18 +1927,20 @@ function MailSection({
     return (
         <SectionShell
             icon={Mail}
-            title={__('Mail (SMTP)')}
-            description={__('Outbound transactional email. Raw SMTP test probes the mail driver only. Lead-email test goes through the queue worker too  —  use it to confirm the full lead-captured pipeline.')}
+            title={t('Mail (SMTP)')}
+            description={t(
+                'Outbound transactional email. Raw SMTP test probes the mail driver only. Lead-email test goes through the queue worker too — use it to confirm the full lead-captured pipeline.',
+            )}
             statusPill={<StatusPill configured={summary.configured} />}
             testEndpoint="/settings/system/test/mail"
-            testLabel={__('Send raw SMTP test')}
+            testLabel={t('Send raw SMTP test')}
             secondaryTestEndpoint="/settings/system/test/lead-email"
-            secondaryTestLabel={__('Send test lead email')}
+            secondaryTestLabel={t('Send test lead email')}
         >
             <form onSubmit={submit} className="grid gap-3">
                 <div className="grid gap-3 sm:grid-cols-2">
                     <div className="grid gap-1">
-                        <Label htmlFor="mail_driver">{__('Driver')}</Label>
+                        <Label htmlFor="mail_driver">{t('Driver')}</Label>
                         <Input
                             id="mail_driver"
                             autoComplete="off"
@@ -1267,7 +1952,7 @@ function MailSection({
                         />
                     </div>
                     <div className="grid gap-1">
-                        <Label htmlFor="mail_host">{__('Host')}</Label>
+                        <Label htmlFor="mail_host">{t('Host')}</Label>
                         <Input
                             id="mail_host"
                             autoComplete="off"
@@ -1281,7 +1966,7 @@ function MailSection({
                 </div>
                 <div className="grid gap-3 sm:grid-cols-3">
                     <div className="grid gap-1">
-                        <Label htmlFor="mail_port">{__('Port')}</Label>
+                        <Label htmlFor="mail_port">{t('Port')}</Label>
                         <Input
                             id="mail_port"
                             type="number"
@@ -1294,7 +1979,9 @@ function MailSection({
                         />
                     </div>
                     <div className="grid gap-1">
-                        <Label htmlFor="mail_encryption">{__('Encryption')}</Label>
+                        <Label htmlFor="mail_encryption">
+                            {t('Encryption')}
+                        </Label>
                         <Select
                             value={form.data.mail_encryption || 'none'}
                             onValueChange={(v) =>
@@ -1308,14 +1995,16 @@ function MailSection({
                                 <SelectValue />
                             </SelectTrigger>
                             <SelectContent>
-                                <SelectItem value="none">none</SelectItem>
+                                <SelectItem value="none">
+                                    {t('none')}
+                                </SelectItem>
                                 <SelectItem value="tls">tls</SelectItem>
                                 <SelectItem value="ssl">ssl</SelectItem>
                             </SelectContent>
                         </Select>
                     </div>
                     <div className="grid gap-1">
-                        <Label htmlFor="mail_username">{__('Username')}</Label>
+                        <Label htmlFor="mail_username">{t('Username')}</Label>
                         <Input
                             id="mail_username"
                             autoComplete="off"
@@ -1327,7 +2016,7 @@ function MailSection({
                     </div>
                 </div>
                 <div className="grid gap-1">
-                    <Label htmlFor="mail_password">{__('Password')}</Label>
+                    <Label htmlFor="mail_password">{t('Password')}</Label>
                     <SecretInput
                         id="mail_password"
                         value={form.data.mail_password}
@@ -1337,7 +2026,9 @@ function MailSection({
                 </div>
                 <div className="grid gap-3 sm:grid-cols-2">
                     <div className="grid gap-1">
-                        <Label htmlFor="mail_from_address">{__('From address')}</Label>
+                        <Label htmlFor="mail_from_address">
+                            {t('From address')}
+                        </Label>
                         <Input
                             id="mail_from_address"
                             type="email"
@@ -1353,7 +2044,7 @@ function MailSection({
                         />
                     </div>
                     <div className="grid gap-1">
-                        <Label htmlFor="mail_from_name">{__('From name')}</Label>
+                        <Label htmlFor="mail_from_name">{t('From name')}</Label>
                         <Input
                             id="mail_from_name"
                             autoComplete="off"
@@ -1361,13 +2052,13 @@ function MailSection({
                             onChange={(e) =>
                                 form.setData('mail_from_name', e.target.value)
                             }
-                            placeholder="OrbyChat"
+                            placeholder={brand}
                         />
                     </div>
                 </div>
                 <div className="flex justify-end">
                     <Button type="submit" disabled={form.processing}>
-                        {__('Save mail')}
+                        {t('Save mail')}
                     </Button>
                 </div>
             </form>
@@ -1375,7 +2066,14 @@ function MailSection({
     );
 }
 
+/**
+ * Live health card for the Cloudflare cron Worker. Reads the
+ * `cron_tick_logs` aggregate the controller folded into the page
+ * payload. Answers the single question: "is the worker actually
+ * firing AND actually doing work?"
+ */
 function CronWorkerHealth({ summary }: { summary: CronWorkerSummary }) {
+    const { t } = useT();
     const liveness = summary.liveness ?? 'unknown';
     const sinceLast = summary.seconds_since_last_tick;
     const lastTickAt = summary.last_tick_at;
@@ -1392,26 +2090,26 @@ function CronWorkerHealth({ summary }: { summary: CronWorkerSummary }) {
 
     const livenessLabel =
         liveness === 'live'
-            ? __('Live  —  firing on schedule')
+            ? t('Live — firing on schedule')
             : liveness === 'stale'
-              ? __('Stale  —  last tick > 90s ago')
+              ? t('Stale — last tick > 90s ago')
               : liveness === 'dead'
-                ? __('Dead  —  no tick in last 5 minutes')
-                : __('Waiting for first tick');
+                ? t('Dead — no tick in last 5 minutes')
+                : t('Waiting for first tick');
 
     const sinceText = (() => {
         if (sinceLast === null || sinceLast === undefined) {
-            return __('No ticks yet  —  give the cron 60s after deploy.');
+            return t('No ticks yet — give the cron 60s after deploy.');
         }
 
         if (sinceLast < 60) {
-            return `${__('Last tick')} ${sinceLast}s ${__('ago')}`;
+            return t('Last tick :sec s ago', { sec: sinceLast });
         }
 
         const m = Math.floor(sinceLast / 60);
         const s = sinceLast % 60;
 
-        return `${__('Last tick')} ${m}m ${s}s ${__('ago')}`;
+        return t('Last tick :min m :sec s ago', { min: m, sec: s });
     })();
 
     return (
@@ -1424,7 +2122,7 @@ function CronWorkerHealth({ summary }: { summary: CronWorkerSummary }) {
                             {sinceText}
                             {lastTickAt && (
                                 <>
-                                    {' -· '}
+                                    {' · '}
                                     {new Date(lastTickAt).toLocaleString()}
                                 </>
                             )}
@@ -1446,21 +2144,21 @@ function CronWorkerHealth({ summary }: { summary: CronWorkerSummary }) {
 
             <div className="grid gap-3 sm:grid-cols-4">
                 <HealthStat
-                    label={__('Ticks (last hour)')}
+                    label={t('Ticks (last hour)')}
                     value={summary.ticks_last_hour ?? 0}
-                    hint={__('should be -‰ˆ 60 when live')}
+                    hint={t('should be ≈ 60 when live')}
                 />
                 <HealthStat
-                    label={__('Jobs processed (1h)')}
+                    label={t('Jobs processed (1h)')}
                     value={summary.jobs_processed_last_hour ?? 0}
                 />
                 <HealthStat
-                    label={__('Pending in queue')}
+                    label={t('Pending in queue')}
                     value={summary.pending_jobs ?? 0}
                     tone={(summary.pending_jobs ?? 0) > 100 ? 'warn' : 'normal'}
                 />
                 <HealthStat
-                    label={__('Failed jobs')}
+                    label={t('Failed jobs')}
                     value={summary.failed_jobs ?? 0}
                     tone={(summary.failed_jobs ?? 0) > 0 ? 'warn' : 'normal'}
                 />
@@ -1469,26 +2167,26 @@ function CronWorkerHealth({ summary }: { summary: CronWorkerSummary }) {
             {recent.length > 0 && (
                 <details className="rounded-md border border-border bg-muted/20 p-3">
                     <summary className="cursor-pointer text-xs font-semibold tracking-wide text-muted-foreground uppercase">
-                        {__('Recent ticks')} ({recent.length})
+                        {t('Recent ticks (:count)', { count: recent.length })}
                     </summary>
                     <div className="mt-3 overflow-x-auto">
                         <table className="w-full text-xs">
                             <thead>
-                                <tr className="border-b border-border text-left text-muted-foreground">
+                                <tr className="border-b border-border text-start text-muted-foreground">
                                     <th className="px-2 py-1.5 font-medium">
-                                        {__('When')}
+                                        {t('When')}
                                     </th>
                                     <th className="px-2 py-1.5 font-medium">
-                                        {__('Processed')}
+                                        {t('Processed')}
                                     </th>
                                     <th className="px-2 py-1.5 font-medium">
-                                        {__('Failed')}
+                                        {t('Failed')}
                                     </th>
                                     <th className="px-2 py-1.5 font-medium">
-                                        {__('Remaining')}
+                                        {t('Remaining')}
                                     </th>
                                     <th className="px-2 py-1.5 font-medium">
-                                        {__('Elapsed')}
+                                        {t('Elapsed')}
                                     </th>
                                 </tr>
                             </thead>
@@ -1563,6 +2261,8 @@ function HealthStat({
 }
 
 function CronWorkerSection({ summary }: { summary: CronWorkerSummary }) {
+    const { t } = useT();
+    const confirm = useConfirm();
     const [pending, setPending] = useState(false);
     const [result, setResult] = useState<{
         ok: boolean;
@@ -1612,7 +2312,9 @@ function CronWorkerSection({ summary }: { summary: CronWorkerSummary }) {
                     ok: false,
                     message:
                         json?.error?.message ??
-                        `${__('Deploy failed')} (HTTP ${res.status}).`,
+                        t('Deploy failed (HTTP :status).', {
+                            status: res.status,
+                        }),
                 });
 
                 return;
@@ -1624,8 +2326,9 @@ function CronWorkerSection({ summary }: { summary: CronWorkerSummary }) {
             setDeployedAt(data.deployed_at);
             setResult({
                 ok: true,
-                message:
-                    __('Deployed. Cloudflare will run the worker every minute.'),
+                message: t(
+                    'Deployed. Cloudflare will run the worker every minute.',
+                ),
                 worker_url: data.worker_url,
             });
         } catch (e) {
@@ -1634,7 +2337,7 @@ function CronWorkerSection({ summary }: { summary: CronWorkerSummary }) {
                 message:
                     e instanceof Error
                         ? e.message
-                        : __('Network error reaching the deploy endpoint.'),
+                        : t('Network error reaching the deploy endpoint.'),
             });
         } finally {
             setPending(false);
@@ -1642,11 +2345,16 @@ function CronWorkerSection({ summary }: { summary: CronWorkerSummary }) {
     };
 
     const onRemove = async () => {
-        if (
-            !confirm(
-                __('Remove the deployed Cloudflare worker? Your queue will stop processing until you re-deploy or set up another cron source.')
-            )
-        ) {
+        const ok = await confirm({
+            title: t('Remove worker?'),
+            message: t(
+                'Remove the deployed Cloudflare worker? Your queue will stop processing until you re-deploy or set up another cron source.',
+            ),
+            confirmLabel: t('Remove'),
+            danger: true,
+        });
+
+        if (!ok) {
             return;
         }
 
@@ -1662,7 +2370,9 @@ function CronWorkerSection({ summary }: { summary: CronWorkerSummary }) {
                     ok: false,
                     message:
                         json?.error?.message ??
-                        `${__('Remove failed')} (HTTP ${res.status}).`,
+                        t('Remove failed (HTTP :status).', {
+                            status: res.status,
+                        }),
                 });
 
                 return;
@@ -1671,11 +2381,11 @@ function CronWorkerSection({ summary }: { summary: CronWorkerSummary }) {
             setDeployed(false);
             setWorkerName(null);
             setDeployedAt(null);
-            setResult({ ok: true, message: __('Worker removed.') });
+            setResult({ ok: true, message: t('Worker removed.') });
         } catch (e) {
             setResult({
                 ok: false,
-                message: e instanceof Error ? e.message : __('Network error.'),
+                message: e instanceof Error ? e.message : t('Network error.'),
             });
         } finally {
             setPending(false);
@@ -1685,14 +2395,20 @@ function CronWorkerSection({ summary }: { summary: CronWorkerSummary }) {
     return (
         <SectionShell
             icon={Workflow}
-            title={__('Cloudflare Cron Worker')}
-            description={__('One-click deploy: run your queue from Cloudflare\'s free cron infrastructure. No cPanel cron required.')}
+            title={t('Cloudflare Cron Worker')}
+            description={t(
+                "One-click deploy: run your queue from Cloudflare's free cron infrastructure. No cPanel cron required.",
+            )}
             statusPill={<StatusPill configured={deployed} />}
         >
             <div className="grid gap-4">
                 {!summary.cloudflare_configured && (
                     <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
-                        {__('Save your Cloudflare account ID + API token under :providers first. The same credentials drive Workers AI and the queue cron.', { providers: __('AI providers → Cloudflare') })}
+                        {t('Save your Cloudflare account ID + API token under')}{' '}
+                        <strong>{t('AI providers → Cloudflare')}</strong>{' '}
+                        {t(
+                            'first. The same credentials drive Workers AI and the queue cron.',
+                        )}
                     </div>
                 )}
 
@@ -1700,7 +2416,7 @@ function CronWorkerSection({ summary }: { summary: CronWorkerSummary }) {
 
                 <div className="rounded-md border border-border bg-muted/30 p-3 text-xs">
                     <p className="text-muted-foreground">
-                        {__('The worker pings this endpoint every minute:')}
+                        {t('The worker pings this endpoint every minute:')}
                     </p>
                     <p className="mt-1 font-mono break-all">
                         POST {summary.callback_url}
@@ -1710,15 +2426,15 @@ function CronWorkerSection({ summary }: { summary: CronWorkerSummary }) {
                 {deployed ? (
                     <div className="rounded-md border border-emerald-300 bg-emerald-50 p-3 text-sm dark:bg-emerald-950/40">
                         <p className="font-medium text-emerald-900 dark:text-emerald-100">
-                            {__('Deployed')}
+                            {t('Deployed')}
                         </p>
                         <p className="mt-1 text-xs text-emerald-800/80 dark:text-emerald-200/80">
-                            {__('Worker name')}:{' '}
+                            {t('Worker name:')}{' '}
                             <span className="font-mono">{workerName}</span>
                             {deployedAt && (
                                 <>
                                     {' '}
-                                    -· {__('deployed')} {' '}
+                                    · {t('deployed')}{' '}
                                     {new Date(deployedAt).toLocaleString()}
                                 </>
                             )}
@@ -1726,7 +2442,9 @@ function CronWorkerSection({ summary }: { summary: CronWorkerSummary }) {
                     </div>
                 ) : (
                     <p className="text-sm text-muted-foreground">
-                        {__('Not deployed yet. Click the button to push the worker to your Cloudflare account.')}
+                        {t(
+                            'Not deployed yet. Click the button to push the worker to your Cloudflare account.',
+                        )}
                     </p>
                 )}
 
@@ -1744,7 +2462,7 @@ function CronWorkerSection({ summary }: { summary: CronWorkerSummary }) {
                                     target="_blank"
                                     rel="noopener noreferrer"
                                 >
-                                    {__('Open in Cloudflare dashboard')} -†—
+                                    {t('Open in Cloudflare dashboard ↗')}
                                 </a>
                             </>
                         )}
@@ -1758,7 +2476,7 @@ function CronWorkerSection({ summary }: { summary: CronWorkerSummary }) {
                         disabled={pending || !summary.cloudflare_configured}
                     >
                         {pending && <Loader2 className="size-4 animate-spin" />}
-                        {deployed ? __('Re-deploy worker') : __('Deploy worker')}
+                        {deployed ? t('Re-deploy worker') : t('Deploy worker')}
                     </Button>
                     {deployed && (
                         <Button
@@ -1767,7 +2485,7 @@ function CronWorkerSection({ summary }: { summary: CronWorkerSummary }) {
                             onClick={onRemove}
                             disabled={pending}
                         >
-                            {__('Remove worker')}
+                            {t('Remove worker')}
                         </Button>
                     )}
                 </div>
@@ -1817,6 +2535,7 @@ function BrandingAssetField({
         | React.ReactNode
         | ((previewUrl: string | null) => React.ReactNode);
 }) {
+    const { t } = useT();
     const selectedPreviewUrl = useSelectedFilePreview(selectedFile);
 
     const assetPreviewUrl = selectedPreviewUrl ?? currentUrl;
@@ -1829,8 +2548,10 @@ function BrandingAssetField({
             ? secondaryPreview(assetPreviewUrl)
             : secondaryPreview;
     const uploadHint = fileName
-        ? `${__('Selected file')}: ${fileName}`
-        : __('PNG, JPG, SVG, or WEBP. Use a wider wordmark for public surfaces and a compact mark for dashboard surfaces.');
+        ? t('Selected file: :name', { name: fileName })
+        : t(
+              'PNG, JPG, SVG, or WEBP. Use a wider wordmark for public surfaces and a compact mark for dashboard surfaces.',
+          );
 
     return (
         <div className="rounded-2xl border border-border/70 bg-card/70 p-5 shadow-sm">
@@ -1867,7 +2588,7 @@ function BrandingAssetField({
                     {supportsDisplayMode ? (
                         <div className="grid gap-2 md:w-[220px] md:shrink-0">
                             <Label htmlFor={`${id}_display`}>
-                                {__('Display mode')}
+                                {t('Display mode')}
                             </Label>
                             <Select
                                 value={displayMode}
@@ -1878,7 +2599,9 @@ function BrandingAssetField({
                                 }
                             >
                                 <SelectTrigger id={`${id}_display`}>
-                                    <SelectValue placeholder={__('Choose display mode')} />
+                                    <SelectValue
+                                        placeholder={t('Choose display mode')}
+                                    />
                                 </SelectTrigger>
                                 <SelectContent>
                                     {BRAND_DISPLAY_OPTIONS.map((option) => (
@@ -1886,18 +2609,18 @@ function BrandingAssetField({
                                             key={option.value}
                                             value={option.value}
                                         >
-                                            {__(option.label)}
+                                            {option.label}
                                         </SelectItem>
                                     ))}
                                 </SelectContent>
                             </Select>
                             <p className="text-[11px] leading-5 text-muted-foreground">
-                                {__(
+                                {
                                     BRAND_DISPLAY_OPTIONS.find(
                                         (option) =>
                                             option.value === displayMode,
-                                    )?.description ?? ''
-                                )}
+                                    )?.description
+                                }
                             </p>
                         </div>
                     ) : null}
@@ -1911,7 +2634,7 @@ function BrandingAssetField({
                 >
                     <div className="rounded-xl border border-border/70 bg-muted/15 p-4">
                         <p className="text-[11px] font-semibold tracking-[0.16em] text-muted-foreground uppercase">
-                            {__('Current asset')}
+                            {t('Current asset')}
                         </p>
                         <div className="mt-3 flex min-h-[120px] items-center justify-center rounded-xl border border-dashed border-border/70 bg-background/85 p-4">
                             {assetPreviewUrl ? (
@@ -1925,7 +2648,7 @@ function BrandingAssetField({
                                 />
                             ) : (
                                 <span className="text-center text-xs font-medium text-muted-foreground">
-                                    {__('No uploaded asset yet')}
+                                    {t('No uploaded asset yet')}
                                 </span>
                             )}
                         </div>
@@ -1934,7 +2657,7 @@ function BrandingAssetField({
                     {hasSecondaryPreview ? (
                         <div className="rounded-xl border border-border/70 bg-muted/15 p-4">
                             <p className="text-[11px] font-semibold tracking-[0.16em] text-muted-foreground uppercase">
-                                {secondaryPreviewLabel ?? __('Surface preview')}
+                                {secondaryPreviewLabel ?? t('Surface preview')}
                             </p>
                             <div
                                 className={cn(
@@ -1977,7 +2700,7 @@ function BrandingAssetField({
                     <div className="flex flex-col gap-3">
                         <div>
                             <p className="text-sm font-medium text-foreground">
-                                {__('Upload replacement')}
+                                {t('Upload replacement')}
                             </p>
                             <p className="mt-1 text-xs leading-5 text-muted-foreground">
                                 {uploadHint}
@@ -1990,16 +2713,18 @@ function BrandingAssetField({
                                 className="inline-flex h-9 cursor-pointer items-center justify-center gap-2 rounded-lg border border-input bg-background px-3 text-sm font-medium text-foreground shadow-xs transition hover:bg-accent hover:text-accent-foreground"
                             >
                                 <Upload className="size-4" />
-                                {fileName ? __('Replace file') : __('Choose file')}
+                                {fileName
+                                    ? t('Replace file')
+                                    : t('Choose file')}
                             </label>
 
-                            <p className="min-w-0 text-xs text-muted-foreground sm:max-w-[260px] sm:text-right">
+                            <p className="min-w-0 text-xs text-muted-foreground sm:max-w-[260px] sm:text-end">
                                 {fileName ? (
                                     <span className="truncate font-medium text-foreground">
                                         {fileName}
                                     </span>
                                 ) : (
-                                    __('No file selected yet')
+                                    t('No file selected yet')
                                 )}
                             </p>
                         </div>
@@ -2017,11 +2742,17 @@ function BrandingAssetField({
 }
 
 function BrandingSection({ initial }: { initial: FormValues }) {
+    const { t } = useT();
+    const branding = useBranding();
+    const brand = branding.site_title || 'OrbyChat';
     const form = useForm<{
         site_title: string;
         header_logo: File | null;
         footer_logo: File | null;
         dashboard_logo: File | null;
+        header_logo_dark: File | null;
+        footer_logo_dark: File | null;
+        dashboard_logo_dark: File | null;
         favicon: File | null;
         header_brand_display: BrandDisplayMode;
         footer_brand_display: BrandDisplayMode;
@@ -2029,11 +2760,18 @@ function BrandingSection({ initial }: { initial: FormValues }) {
         orbychat_brand_url: string;
         orbychat_brand_label: string;
         marketing_site_enabled: boolean;
+        auth_aside_eyebrow: string;
+        auth_aside_heading: string;
+        auth_aside_lede: string;
+        auth_aside_bullets: string[];
     }>({
         site_title: initial.site_title ?? '',
         header_logo: null,
         footer_logo: null,
         dashboard_logo: null,
+        header_logo_dark: null,
+        footer_logo_dark: null,
+        dashboard_logo_dark: null,
         favicon: null,
         header_brand_display: initial.header_brand_display,
         footer_brand_display: initial.footer_brand_display,
@@ -2041,6 +2779,12 @@ function BrandingSection({ initial }: { initial: FormValues }) {
         orbychat_brand_url: initial.orbychat_brand_url ?? '',
         orbychat_brand_label: initial.orbychat_brand_label ?? '',
         marketing_site_enabled: initial.marketing_site_enabled ?? true,
+        auth_aside_eyebrow: initial.auth_aside_eyebrow ?? '',
+        auth_aside_heading: initial.auth_aside_heading ?? '',
+        auth_aside_lede: initial.auth_aside_lede ?? '',
+        auth_aside_bullets: Array.isArray(initial.auth_aside_bullets)
+            ? initial.auth_aside_bullets
+            : [],
     });
 
     const headerLogoPreview = useSelectedFilePreview(form.data.header_logo);
@@ -2061,6 +2805,9 @@ function BrandingSection({ initial }: { initial: FormValues }) {
             form.data.header_logo,
             form.data.footer_logo,
             form.data.dashboard_logo,
+            form.data.header_logo_dark,
+            form.data.footer_logo_dark,
+            form.data.dashboard_logo_dark,
             form.data.favicon,
         ].some((file) => file !== null);
 
@@ -2069,6 +2816,9 @@ function BrandingSection({ initial }: { initial: FormValues }) {
                 'header_logo',
                 'footer_logo',
                 'dashboard_logo',
+                'header_logo_dark',
+                'footer_logo_dark',
+                'dashboard_logo_dark',
                 'favicon',
             );
         };
@@ -2084,6 +2834,8 @@ function BrandingSection({ initial }: { initial: FormValues }) {
             return;
         }
 
+        // For multipart uploads, Laravel reliably honors method spoofing
+        // when `_method` is sent in the POST body.
         form.transform((data) => ({
             ...data,
             _method: 'patch',
@@ -2100,8 +2852,10 @@ function BrandingSection({ initial }: { initial: FormValues }) {
     return (
         <SectionShell
             icon={Palette}
-            title={__('Site branding')}
-            description={__('Manage the global site title, uploaded logos for public and dashboard surfaces, the favicon, and the widget footer link used on free plans.')}
+            title={t('Site branding')}
+            description={t(
+                'Manage the global site title, uploaded logos for public and dashboard surfaces, the favicon, and the widget footer link used on free plans.',
+            )}
         >
             <form onSubmit={submit} className="grid gap-5">
                 <div className="rounded-[28px] border border-border/70 bg-gradient-to-br from-card via-card to-muted/25 p-6 shadow-sm">
@@ -2112,20 +2866,26 @@ function BrandingSection({ initial }: { initial: FormValues }) {
                                     variant="outline"
                                     className="border-border/70 bg-background/70 px-2.5 py-1 text-[10px] font-semibold tracking-[0.16em] text-muted-foreground uppercase"
                                 >
-                                    {__('Brand system')}
+                                    {t('Brand system')}
                                 </Badge>
                                 <div>
                                     <h3 className="text-lg font-semibold tracking-tight text-foreground">
-                                        {__('Control every brand surface from one place')}
+                                        {t(
+                                            'Control every brand surface from one place',
+                                        )}
                                     </h3>
                                     <p className="mt-1 max-w-2xl text-sm leading-6 text-muted-foreground">
-                                        {__('Update the brand title, preview how each surface renders, and replace assets without guessing how they will appear in the app.')}
+                                        {t(
+                                            'Update the brand title, preview how each surface renders, and replace assets without guessing how they will appear in the app.',
+                                        )}
                                     </p>
                                 </div>
                             </div>
 
                             <div className="grid gap-2.5 rounded-2xl border border-border/70 bg-background/75 p-4 shadow-xs">
-                                <Label htmlFor="site_title">{__('Site title')}</Label>
+                                <Label htmlFor="site_title">
+                                    {t('Site title')}
+                                </Label>
                                 <Input
                                     id="site_title"
                                     autoComplete="off"
@@ -2136,10 +2896,12 @@ function BrandingSection({ initial }: { initial: FormValues }) {
                                             e.target.value,
                                         )
                                     }
-                                    placeholder="OrbyChat"
+                                    placeholder={brand}
                                 />
                                 <p className="text-xs leading-5 text-muted-foreground">
-                                    {__('Used in the browser title, shared app branding props, and text fallbacks when no custom logo is uploaded.')}
+                                    {t(
+                                        'Used in the browser title, shared app branding props, and text fallbacks when no custom logo is uploaded.',
+                                    )}
                                 </p>
                                 {form.errors.site_title ? (
                                     <p className="text-xs font-medium text-destructive">
@@ -2153,35 +2915,37 @@ function BrandingSection({ initial }: { initial: FormValues }) {
                                     variant="outline"
                                     className="border-border/70 bg-background/70 text-[11px] text-muted-foreground"
                                 >
-                                    {__('Landing + auth')}
+                                    {t('Landing + auth')}
                                 </Badge>
                                 <Badge
                                     variant="outline"
                                     className="border-border/70 bg-background/70 text-[11px] text-muted-foreground"
                                 >
-                                    {__('Dashboard shell')}
+                                    {t('Dashboard shell')}
                                 </Badge>
                                 <Badge
                                     variant="outline"
                                     className="border-border/70 bg-background/70 text-[11px] text-muted-foreground"
                                 >
-                                    {__('Footer + widget badge')}
+                                    {t('Footer + widget badge')}
                                 </Badge>
                                 <Badge
                                     variant="outline"
                                     className="border-border/70 bg-background/70 text-[11px] text-muted-foreground"
                                 >
-                                    {__('Browser tab')}
+                                    {t('Browser tab')}
                                 </Badge>
                             </div>
                         </div>
 
                         <div className="grid gap-3 sm:grid-cols-2">
                             <BrandSurfacePreview
-                                title={__('Header')}
-                                caption={__('Landing and auth')}
+                                title={t('Header')}
+                                caption={t('Landing and auth')}
                                 icon={PanelTop}
-                                siteTitle={form.data.site_title || __('Site title')}
+                                siteTitle={
+                                    form.data.site_title || t('Site title')
+                                }
                                 logoUrl={
                                     headerLogoPreview ?? initial.header_logo_url
                                 }
@@ -2190,10 +2954,12 @@ function BrandingSection({ initial }: { initial: FormValues }) {
                             />
 
                             <BrandSurfacePreview
-                                title={__('Dashboard')}
-                                caption={__('App shell')}
+                                title={t('Dashboard')}
+                                caption={t('App shell')}
                                 icon={LayoutDashboard}
-                                siteTitle={form.data.site_title || __('Site title')}
+                                siteTitle={
+                                    form.data.site_title || t('Site title')
+                                }
                                 logoUrl={
                                     dashboardLogoPreview ??
                                     initial.dashboard_logo_url
@@ -2203,10 +2969,12 @@ function BrandingSection({ initial }: { initial: FormValues }) {
                             />
 
                             <BrandSurfacePreview
-                                title={__('Footer')}
-                                caption={__('Marketing footer + widget')}
+                                title={t('Footer')}
+                                caption={t('Marketing footer + widget')}
                                 icon={PanelBottom}
-                                siteTitle={form.data.site_title || __('Site title')}
+                                siteTitle={
+                                    form.data.site_title || t('Site title')
+                                }
                                 logoUrl={
                                     footerLogoPreview ??
                                     initial.footer_logo_url ??
@@ -2219,7 +2987,9 @@ function BrandingSection({ initial }: { initial: FormValues }) {
                             />
 
                             <FaviconSurfacePreview
-                                siteTitle={form.data.site_title || __('Site title')}
+                                siteTitle={
+                                    form.data.site_title || t('Site title')
+                                }
                                 faviconUrl={
                                     faviconPreview ?? initial.favicon_url
                                 }
@@ -2231,16 +3001,18 @@ function BrandingSection({ initial }: { initial: FormValues }) {
                 <div className="grid gap-5 lg:grid-cols-2">
                     <BrandingAssetField
                         id="header_logo"
-                        label={__('Header logo')}
-                        surfaceLabel={__('Public + auth')}
+                        label={t('Header logo')}
+                        surfaceLabel={t('Public + auth')}
                         icon={PanelTop}
-                        description={__('Used in the public landing-page header and the auth entry points.')}
+                        description={t(
+                            'Used in the public landing-page header and the auth entry points.',
+                        )}
                         accept="image/png,image/jpeg,image/webp,image/svg+xml"
                         currentUrl={initial.header_logo_url}
                         selectedFile={form.data.header_logo}
                         fileName={form.data.header_logo?.name}
                         error={form.errors.header_logo}
-                        siteTitle={form.data.site_title || __('Site title')}
+                        siteTitle={form.data.site_title || t('Site title')}
                         displayMode={form.data.header_brand_display}
                         onDisplayModeChange={(value) =>
                             form.setData('header_brand_display', value)
@@ -2250,17 +3022,43 @@ function BrandingSection({ initial }: { initial: FormValues }) {
                     />
 
                     <BrandingAssetField
+                        id="header_logo_dark"
+                        label={t('Header logo (dark mode)')}
+                        surfaceLabel={t('Public + auth')}
+                        icon={PanelTop}
+                        description={t(
+                            'Optional. Swapped in when the visitor or operator is in dark mode. Leave empty to reuse the light logo (works for transparent or duotone wordmarks).',
+                        )}
+                        accept="image/png,image/jpeg,image/webp,image/svg+xml"
+                        currentUrl={initial.header_logo_dark_url}
+                        selectedFile={form.data.header_logo_dark}
+                        fileName={form.data.header_logo_dark?.name}
+                        error={form.errors.header_logo_dark}
+                        siteTitle={form.data.site_title || t('Site title')}
+                        displayMode={form.data.header_brand_display}
+                        onDisplayModeChange={(value) =>
+                            form.setData('header_brand_display', value)
+                        }
+                        surfacePreviewClassName="bg-gradient-to-br from-[#0c0e12] via-[#101216] to-[#1a1d24]"
+                        onChange={(file) =>
+                            form.setData('header_logo_dark', file)
+                        }
+                    />
+
+                    <BrandingAssetField
                         id="footer_logo"
-                        label={__('Footer logo')}
-                        surfaceLabel={__('Footer + widget')}
+                        label={t('Footer logo')}
+                        surfaceLabel={t('Footer + widget')}
                         icon={PanelBottom}
-                        description={__('Used in the public footer and the free-plan widget branding badge.')}
+                        description={t(
+                            'Used in the public footer and the free-plan widget branding badge.',
+                        )}
                         accept="image/png,image/jpeg,image/webp,image/svg+xml"
                         currentUrl={initial.footer_logo_url}
                         selectedFile={form.data.footer_logo}
                         fileName={form.data.footer_logo?.name}
                         error={form.errors.footer_logo}
-                        siteTitle={form.data.site_title || __('Site title')}
+                        siteTitle={form.data.site_title || t('Site title')}
                         displayMode={form.data.footer_brand_display}
                         onDisplayModeChange={(value) =>
                             form.setData('footer_brand_display', value)
@@ -2270,17 +3068,43 @@ function BrandingSection({ initial }: { initial: FormValues }) {
                     />
 
                     <BrandingAssetField
+                        id="footer_logo_dark"
+                        label={t('Footer logo (dark mode)')}
+                        surfaceLabel={t('Footer + widget')}
+                        icon={PanelBottom}
+                        description={t(
+                            'Optional. Swapped in when the visitor or operator is in dark mode.',
+                        )}
+                        accept="image/png,image/jpeg,image/webp,image/svg+xml"
+                        currentUrl={initial.footer_logo_dark_url}
+                        selectedFile={form.data.footer_logo_dark}
+                        fileName={form.data.footer_logo_dark?.name}
+                        error={form.errors.footer_logo_dark}
+                        siteTitle={form.data.site_title || t('Site title')}
+                        displayMode={form.data.footer_brand_display}
+                        onDisplayModeChange={(value) =>
+                            form.setData('footer_brand_display', value)
+                        }
+                        surfacePreviewClassName="bg-gradient-to-br from-[#0c0e12] to-[#1a1d24]"
+                        onChange={(file) =>
+                            form.setData('footer_logo_dark', file)
+                        }
+                    />
+
+                    <BrandingAssetField
                         id="dashboard_logo"
-                        label={__('Dashboard logo')}
-                        surfaceLabel={__('App shell')}
+                        label={t('Dashboard logo')}
+                        surfaceLabel={t('App shell')}
                         icon={LayoutDashboard}
-                        description={__('Used in the logged-in app shell and platform admin sidebar.')}
+                        description={t(
+                            'Used in the logged-in app shell and platform admin sidebar.',
+                        )}
                         accept="image/png,image/jpeg,image/webp,image/svg+xml"
                         currentUrl={initial.dashboard_logo_url}
                         selectedFile={form.data.dashboard_logo}
                         fileName={form.data.dashboard_logo?.name}
                         error={form.errors.dashboard_logo}
-                        siteTitle={form.data.site_title || __('Site title')}
+                        siteTitle={form.data.site_title || t('Site title')}
                         displayMode={form.data.dashboard_brand_display}
                         onDisplayModeChange={(value) =>
                             form.setData('dashboard_brand_display', value)
@@ -2292,18 +3116,44 @@ function BrandingSection({ initial }: { initial: FormValues }) {
                     />
 
                     <BrandingAssetField
+                        id="dashboard_logo_dark"
+                        label={t('Dashboard logo (dark mode)')}
+                        surfaceLabel={t('App shell')}
+                        icon={LayoutDashboard}
+                        description={t(
+                            'Optional. Swapped in when the operator is in dark mode.',
+                        )}
+                        accept="image/png,image/jpeg,image/webp,image/svg+xml"
+                        currentUrl={initial.dashboard_logo_dark_url}
+                        selectedFile={form.data.dashboard_logo_dark}
+                        fileName={form.data.dashboard_logo_dark?.name}
+                        error={form.errors.dashboard_logo_dark}
+                        siteTitle={form.data.site_title || t('Site title')}
+                        displayMode={form.data.dashboard_brand_display}
+                        onDisplayModeChange={(value) =>
+                            form.setData('dashboard_brand_display', value)
+                        }
+                        surfacePreviewClassName="bg-gradient-to-br from-[#0d1015] to-[#181c22]"
+                        onChange={(file) =>
+                            form.setData('dashboard_logo_dark', file)
+                        }
+                    />
+
+                    <BrandingAssetField
                         id="favicon"
-                        label={__('Favicon')}
-                        surfaceLabel={__('Browser tab')}
+                        label={t('Favicon')}
+                        surfaceLabel={t('Browser tab')}
                         icon={Globe2}
-                        description={__('Used for browser tabs and the initial HTML shell before the app hydrates.')}
+                        description={t(
+                            'Used for browser tabs and the initial HTML shell before the app hydrates.',
+                        )}
                         accept="image/png,image/jpeg,image/webp,image/svg+xml,image/x-icon"
                         currentUrl={initial.favicon_url}
                         selectedFile={form.data.favicon}
                         fileName={form.data.favicon?.name}
                         error={form.errors.favicon}
-                        siteTitle={form.data.site_title || __('Site title')}
-                        secondaryPreviewLabel={__('Tab preview')}
+                        siteTitle={form.data.site_title || t('Site title')}
+                        secondaryPreviewLabel={t('Tab preview')}
                         secondaryPreview={(previewUrl) => (
                             <div className="w-full rounded-xl border border-border/70 bg-background/95 p-3 shadow-xs">
                                 <div className="flex items-center gap-2">
@@ -2323,7 +3173,8 @@ function BrandingSection({ initial }: { initial: FormValues }) {
                                         </span>
                                     )}
                                     <span className="truncate text-xs font-medium text-foreground">
-                                        {form.data.site_title || __('Site title')}
+                                        {form.data.site_title ||
+                                            t('Site title')}
                                     </span>
                                 </div>
                             </div>
@@ -2339,17 +3190,19 @@ function BrandingSection({ initial }: { initial: FormValues }) {
                         <div className="grid gap-4">
                             <div>
                                 <h3 className="text-sm font-semibold text-foreground">
-                                    {__('Widget footer link')}
+                                    {t('Widget footer link')}
                                 </h3>
                                 <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                                    {__('This still controls the free-plan -€œPowered by …-€  link inside the visitor widget.')}
+                                    {t(
+                                        'This still controls the free-plan “Powered by …” link inside the visitor widget.',
+                                    )}
                                 </p>
                             </div>
 
                             <div className="grid gap-3 md:grid-cols-2">
                                 <div className="grid gap-1">
                                     <Label htmlFor="orbychat_brand_url">
-                                        {__('Link URL')}
+                                        {t('Link URL')}
                                     </Label>
                                     <Input
                                         id="orbychat_brand_url"
@@ -2373,7 +3226,7 @@ function BrandingSection({ initial }: { initial: FormValues }) {
 
                                 <div className="grid gap-1">
                                     <Label htmlFor="orbychat_brand_label">
-                                        {__('Label')}
+                                        {t('Label')}
                                     </Label>
                                     <Input
                                         id="orbychat_brand_label"
@@ -2385,7 +3238,9 @@ function BrandingSection({ initial }: { initial: FormValues }) {
                                                 e.target.value,
                                             )
                                         }
-                                        placeholder="Powered by OrbyChat"
+                                        placeholder={t('Powered by :brand', {
+                                            brand,
+                                        })}
                                     />
                                     {form.errors.orbychat_brand_label ? (
                                         <p className="text-xs font-medium text-destructive">
@@ -2398,26 +3253,28 @@ function BrandingSection({ initial }: { initial: FormValues }) {
                             <Separator />
 
                             <p className="text-xs leading-5 text-muted-foreground">
-                                {__('Keep this label short so it reads cleanly inside the widget badge.')}
+                                {t(
+                                    'Keep this label short so it reads cleanly inside the widget badge.',
+                                )}
                             </p>
                         </div>
 
                         <div className="rounded-xl border border-border/70 bg-muted/15 p-4">
                             <p className="text-[11px] font-semibold tracking-[0.16em] text-muted-foreground uppercase">
-                                {__('Widget badge preview')}
+                                {t('Widget badge preview')}
                             </p>
                             <div className="mt-3 flex min-h-[108px] items-end rounded-xl border border-dashed border-border/70 bg-[#111214] p-4">
                                 <span className="inline-flex max-w-full items-center rounded-full bg-background px-3 py-2 text-xs font-medium text-foreground shadow-sm ring-1 ring-white/10">
                                     <span className="truncate">
                                         {form.data.orbychat_brand_label ||
-                                            'Powered by OrbyChat'}
+                                            t('Powered by :brand', { brand })}
                                     </span>
                                 </span>
                             </div>
                             <p className="mt-3 text-[11px] leading-5 text-muted-foreground">
-                                {__('Link target')}:{' '}
+                                {t('Link target:')}{' '}
                                 {form.data.orbychat_brand_url ||
-                                    __('No URL set yet')}
+                                    t('No URL set yet')}
                             </p>
                         </div>
                     </div>
@@ -2438,23 +3295,122 @@ function BrandingSection({ initial }: { initial: FormValues }) {
                         />
                         <div className="min-w-0">
                             <p className="text-sm font-medium text-foreground">
-                                {__('Public marketing site')}
+                                {t('Public marketing site')}
                             </p>
                             <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                                {__('When on, anyone landing on')} {' '}
-                                <code className="px-1">/</code>,
-                                <code className="px-1">/pricing</code>,
-                                <code className="px-1">/changelog</code>, {__('or')} {' '}
-                                <code className="px-1">/documentation</code> {' '}
-                                {__('sees the public marketing site. Turn it off for a private SaaS install  —  visitors are redirected to')} <code>/login</code> {__('instead, and search engines are told to skip the whole domain. Privacy / terms / auth flows stay reachable always.')}
+                                {t(
+                                    'When on, anyone landing on /, /pricing, /changelog, or /documentation sees the public marketing site. Turn it off for a private SaaS install — visitors are redirected to /login instead, and search engines are told to skip the whole domain. Privacy / terms / auth flows stay reachable always.',
+                                )}
                             </p>
                         </div>
                     </label>
                 </div>
 
+                {/* Auth-page side-panel copy (Aurora + Prism themes).
+                    Blank = theme default copy. Buyer-reported: hard-
+                    coded marketing-site phrasing leaked through to
+                    workspaces whose product is not a marketing surface. */}
+                <div className="grid gap-3 rounded-xl border border-border/70 bg-muted/15 p-4">
+                    <div>
+                        <h3 className="text-sm font-semibold text-foreground">
+                            {t('Auth page side panel')}
+                        </h3>
+                        <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                            {t(
+                                'Customise the copy that appears on the login / register / forgot-password pages of the Aurora and Prism marketing themes. Leave blank to use the theme’s default.',
+                            )}
+                        </p>
+                    </div>
+                    <div className="grid gap-3 md:grid-cols-2">
+                        <div className="grid gap-1">
+                            <Label htmlFor="auth_aside_eyebrow">
+                                {t('Eyebrow tag')}
+                            </Label>
+                            <Input
+                                id="auth_aside_eyebrow"
+                                autoComplete="off"
+                                value={form.data.auth_aside_eyebrow}
+                                onChange={(e) =>
+                                    form.setData(
+                                        'auth_aside_eyebrow',
+                                        e.target.value,
+                                    )
+                                }
+                                placeholder="SECURE WORKSPACE"
+                            />
+                        </div>
+                        <div className="grid gap-1">
+                            <Label htmlFor="auth_aside_heading">
+                                {t('Heading')}
+                            </Label>
+                            <Input
+                                id="auth_aside_heading"
+                                autoComplete="off"
+                                value={form.data.auth_aside_heading}
+                                onChange={(e) =>
+                                    form.setData(
+                                        'auth_aside_heading',
+                                        e.target.value,
+                                    )
+                                }
+                                placeholder="Sign in to the signal."
+                            />
+                        </div>
+                    </div>
+                    <div className="grid gap-1">
+                        <Label htmlFor="auth_aside_lede">
+                            {t('Lede paragraph')}
+                        </Label>
+                        <textarea
+                            id="auth_aside_lede"
+                            rows={3}
+                            value={form.data.auth_aside_lede}
+                            onChange={(e) =>
+                                form.setData('auth_aside_lede', e.target.value)
+                            }
+                            className="min-h-[80px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                            placeholder={t(
+                                'Short paragraph shown under the heading. Speaks in your brand voice — keep under ~200 characters.',
+                            )}
+                        />
+                    </div>
+                    <div className="grid gap-1">
+                        <Label>{t('Bullet points (up to 6)')}</Label>
+                        {[0, 1, 2, 3, 4, 5].map((i) => (
+                            <Input
+                                key={i}
+                                autoComplete="off"
+                                value={form.data.auth_aside_bullets[i] ?? ''}
+                                onChange={(e) => {
+                                    const next = [
+                                        ...form.data.auth_aside_bullets,
+                                    ];
+                                    next[i] = e.target.value;
+                                    form.setData(
+                                        'auth_aside_bullets',
+                                        next.filter(
+                                            (_, idx) =>
+                                                idx < 6 &&
+                                                (idx <= i ||
+                                                    (next[idx] ?? '').trim() !==
+                                                        ''),
+                                        ),
+                                    );
+                                }}
+                                placeholder={t('Bullet point :n', { n: i + 1 })}
+                            />
+                        ))}
+                        <p className="text-xs text-muted-foreground">
+                            {t(
+                                'Empty rows are dropped on save. Leave all blank to fall back to the theme defaults.',
+                            )}
+                        </p>
+                    </div>
+                </div>
+
                 <div className="flex justify-end">
                     <Button type="submit" disabled={form.processing}>
-                        {__('Save branding')}
+                        {t('Save branding')}
                     </Button>
                 </div>
             </form>
@@ -2469,14 +3425,536 @@ function MarketingSection({
     summary: MarketingSummary;
     initial: FormValues;
 }) {
+    const { t } = useT();
+
+    return (
+        <>
+            <SectionShell
+                icon={Sparkles}
+                title={t('Marketing homepage')}
+                description={t(
+                    'Manage the public landing page with structured fields instead of raw JSON. Missing keys still fall back to the server defaults when you save.',
+                )}
+                statusPill={<StatusPill configured={summary.customized} />}
+            >
+                <MarketingContentEditor
+                    initial={initial.marketing_home_content}
+                />
+            </SectionShell>
+
+            <MarketingThemeSection
+                themeOptions={summary.theme_options ?? []}
+                initialTheme={initial.marketing_theme}
+            />
+
+            <MarketingWidgetSection
+                agentOptions={summary.agent_options ?? []}
+                initialEnabled={initial.marketing_widget_enabled}
+                initialAgentId={initial.marketing_widget_agent_id}
+            />
+
+            <PricingFaqsSection initial={initial.pricing_faqs ?? []} />
+        </>
+    );
+}
+
+function MarketingThemeSection({
+    themeOptions = [],
+    initialTheme,
+}: {
+    themeOptions?: Array<{
+        slug: string;
+        name: string;
+        description: string | null;
+    }>;
+    initialTheme: string;
+}) {
+    const { t } = useT();
+    const safeThemeOptions = Array.isArray(themeOptions) ? themeOptions : [];
+    const form = useForm<{ marketing_theme: string }>({
+        marketing_theme: initialTheme,
+    });
+
+    const activeTheme = safeThemeOptions.find(
+        (opt) => opt.slug === form.data.marketing_theme,
+    );
+
     return (
         <SectionShell
             icon={Sparkles}
-            title={__('Marketing homepage')}
-            description={__('Manage the public landing page with structured fields instead of raw JSON. Missing keys still fall back to the server defaults when you save.')}
-            statusPill={<StatusPill configured={summary.customized} />}
+            title={t('Marketing theme')}
+            description={t(
+                'Swap the entire marketing-site layout (home, pricing, how-it-works, integrations, privacy, terms, changelog) to a different theme bundle. Operators add new themes under resources/js/pages/marketing-themes/{slug}/ — see the Marketing themes documentation page for the convention.',
+            )}
+            statusPill={
+                <span className="rounded-full border border-border bg-background px-2 py-0.5 text-[10px] font-semibold tracking-wide text-foreground uppercase">
+                    {activeTheme?.name ?? form.data.marketing_theme}
+                </span>
+            }
         >
-            <MarketingContentEditor initial={initial.marketing_home_content} />
+            <form
+                onSubmit={(e) => {
+                    e.preventDefault();
+                    form.patch(
+                        updateSystemSettings({ section: 'marketing' }).url,
+                        { preserveScroll: true },
+                    );
+                }}
+                className="space-y-4"
+            >
+                <div className="grid gap-1.5">
+                    <Label htmlFor="marketing-theme">{t('Active theme')}</Label>
+                    <select
+                        id="marketing-theme"
+                        className="rounded-md border bg-background px-2 py-1.5 text-sm"
+                        value={form.data.marketing_theme}
+                        onChange={(e) =>
+                            form.setData('marketing_theme', e.target.value)
+                        }
+                    >
+                        {safeThemeOptions.map((opt) => (
+                            <option key={opt.slug} value={opt.slug}>
+                                {opt.name}
+                            </option>
+                        ))}
+                    </select>
+                    {activeTheme?.description && (
+                        <p className="text-xs text-muted-foreground">
+                            {activeTheme.description}
+                        </p>
+                    )}
+                    {safeThemeOptions.length === 1 && (
+                        <p className="text-xs text-muted-foreground">
+                            {t(
+                                'Only the built-in Harvest theme is installed. Add a folder at resources/js/pages/marketing-themes/{slug}/ with a theme.json manifest to register more themes.',
+                            )}
+                        </p>
+                    )}
+                </div>
+
+                <div className="flex justify-end">
+                    <Button type="submit" disabled={form.processing}>
+                        {t('Save theme')}
+                    </Button>
+                </div>
+            </form>
+        </SectionShell>
+    );
+}
+
+function MarketingWidgetSection({
+    agentOptions = [],
+    initialEnabled,
+    initialAgentId,
+}: {
+    agentOptions?: Array<{ id: string; label: string }>;
+    initialEnabled: boolean;
+    initialAgentId: string | null;
+}) {
+    const { t } = useT();
+    const safeAgentOptions = Array.isArray(agentOptions) ? agentOptions : [];
+    const form = useForm<{
+        marketing_widget_enabled: boolean;
+        marketing_widget_agent_id: string | null;
+    }>({
+        marketing_widget_enabled: initialEnabled,
+        marketing_widget_agent_id: initialAgentId,
+    });
+
+    return (
+        <SectionShell
+            icon={Sparkles}
+            title={t('Marketing-site widget')}
+            description={t(
+                'Mount one of your published agents on the public marketing pages (/, /welcome, /marketing/*). Anonymous visitors get a real chat surface, not a demo sandbox.',
+            )}
+            statusPill={
+                <StatusPill
+                    configured={initialEnabled && initialAgentId !== null}
+                />
+            }
+        >
+            <form
+                onSubmit={(e) => {
+                    e.preventDefault();
+                    form.patch(
+                        updateSystemSettings({ section: 'marketing' }).url,
+                        { preserveScroll: true },
+                    );
+                }}
+                className="space-y-4"
+            >
+                <label className="flex cursor-pointer items-start gap-3 rounded-md border bg-background p-3">
+                    <input
+                        type="checkbox"
+                        checked={form.data.marketing_widget_enabled}
+                        onChange={(e) =>
+                            form.setData(
+                                'marketing_widget_enabled',
+                                (e.target as HTMLInputElement).checked,
+                            )
+                        }
+                        className="mt-0.5 size-4 shrink-0 rounded border-border text-foreground focus:ring-2 focus:ring-ring/40"
+                    />
+                    <div className="min-w-0">
+                        <p className="text-sm font-medium text-foreground">
+                            {t('Enable widget on marketing pages')}
+                        </p>
+                        <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                            {t(
+                                'When off, the marketing site has no chat surface (default). When on, the selected agent below mounts for anonymous visitors only — signed-in admins never see it.',
+                            )}
+                        </p>
+                    </div>
+                </label>
+
+                <div className="grid gap-1.5">
+                    <Label htmlFor="marketing-widget-agent">
+                        {t('Agent to mount')}
+                    </Label>
+                    <select
+                        id="marketing-widget-agent"
+                        className="rounded-md border bg-background px-2 py-1.5 text-sm"
+                        value={form.data.marketing_widget_agent_id ?? ''}
+                        onChange={(e) =>
+                            form.setData(
+                                'marketing_widget_agent_id',
+                                e.target.value === '' ? null : e.target.value,
+                            )
+                        }
+                        disabled={!form.data.marketing_widget_enabled}
+                    >
+                        <option value="">{t('— Pick an agent —')}</option>
+                        {safeAgentOptions.map((opt) => (
+                            <option key={opt.id} value={opt.id}>
+                                {opt.label}
+                            </option>
+                        ))}
+                    </select>
+                    {safeAgentOptions.length === 0 && (
+                        <p className="text-xs text-amber-700 dark:text-amber-300">
+                            {t(
+                                'No published agents found. Publish an agent first, then come back here to wire it up.',
+                            )}
+                        </p>
+                    )}
+                </div>
+
+                <div className="flex justify-end">
+                    <Button type="submit" disabled={form.processing}>
+                        {t('Save marketing widget')}
+                    </Button>
+                </div>
+            </form>
+        </SectionShell>
+    );
+}
+
+type FaqRow = { q: string; a: string };
+
+function PricingFaqsSection({ initial }: { initial: FaqRow[] }) {
+    const { t } = useT();
+    const form = useForm<{ pricing_faqs: FaqRow[] }>({
+        pricing_faqs: initial,
+    });
+
+    const update = (idx: number, field: 'q' | 'a', value: string) => {
+        const next = [...form.data.pricing_faqs];
+        next[idx] = { ...next[idx], [field]: value };
+        form.setData('pricing_faqs', next);
+    };
+
+    const add = () => {
+        form.setData('pricing_faqs', [
+            ...form.data.pricing_faqs,
+            { q: '', a: '' },
+        ]);
+    };
+
+    const remove = (idx: number) => {
+        form.setData(
+            'pricing_faqs',
+            form.data.pricing_faqs.filter((_, i) => i !== idx),
+        );
+    };
+
+    return (
+        <SectionShell
+            icon={Sparkles}
+            title={t('Pricing page FAQ')}
+            description={t(
+                'Edit the FAQ shown on the public /pricing page. Saved entries override the default copy; clear all rows to fall back to defaults.',
+            )}
+        >
+            <form
+                onSubmit={(e) => {
+                    e.preventDefault();
+                    form.patch(
+                        updateSystemSettings({ section: 'pricing' }).url,
+                    );
+                }}
+                className="space-y-3"
+            >
+                {form.data.pricing_faqs.map((row, i) => (
+                    <div
+                        key={i}
+                        className="grid gap-2 rounded-lg border bg-muted/15 p-3"
+                    >
+                        <Input
+                            placeholder={t('Question')}
+                            value={row.q}
+                            onChange={(e) => update(i, 'q', e.target.value)}
+                            maxLength={240}
+                        />
+                        <textarea
+                            placeholder={t('Answer')}
+                            value={row.a}
+                            onChange={(e) => update(i, 'a', e.target.value)}
+                            maxLength={2000}
+                            rows={3}
+                            className="rounded-md border bg-background p-2 text-sm"
+                        />
+                        <div className="flex justify-end">
+                            <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => remove(i)}
+                            >
+                                {t('Remove')}
+                            </Button>
+                        </div>
+                    </div>
+                ))}
+                <div className="flex justify-between gap-2">
+                    <Button type="button" variant="outline" onClick={add}>
+                        {t('Add FAQ')}
+                    </Button>
+                    <Button type="submit" disabled={form.processing}>
+                        {t('Save FAQ')}
+                    </Button>
+                </div>
+            </form>
+        </SectionShell>
+    );
+}
+
+const INTEGRATION_KINDS: {
+    key: keyof IntegrationToggleState;
+    label: string;
+}[] = [
+    { key: 'slack', label: 'Slack' },
+    { key: 'webhooks', label: 'Outbound webhooks' },
+    { key: 'notion', label: 'Notion' },
+    { key: 'google', label: 'Google Drive (Docs)' },
+    { key: 'wordpress', label: 'WordPress & WooCommerce' },
+];
+
+type IntegrationToggleState = {
+    slack?: boolean;
+    notion?: boolean;
+    google?: boolean;
+    webhooks?: boolean;
+    wordpress?: boolean;
+};
+
+function IntegrationsToggleSection({
+    initial,
+}: {
+    initial: IntegrationToggleState;
+}) {
+    const { t } = useT();
+    const form = useForm<{ integrations_enabled: IntegrationToggleState }>({
+        integrations_enabled: initial,
+    });
+
+    const toggle = (kind: keyof IntegrationToggleState, on: boolean) => {
+        form.setData('integrations_enabled', {
+            ...form.data.integrations_enabled,
+            [kind]: on,
+        });
+    };
+
+    return (
+        <SectionShell
+            icon={Sparkles}
+            title={t('Integrations available to workspaces')}
+            description={t(
+                'Turn an integration off here to hide its card from every workspace owner under /app/integrations. Disabled integrations still preserve any existing connections in the DB.',
+            )}
+        >
+            <form
+                onSubmit={(e) => {
+                    e.preventDefault();
+                    form.patch(
+                        updateSystemSettings({ section: 'integrations' }).url,
+                    );
+                }}
+                className="space-y-3"
+            >
+                <div className="grid gap-2">
+                    {INTEGRATION_KINDS.map(({ key, label }) => {
+                        const current =
+                            form.data.integrations_enabled[key] !== false;
+
+                        return (
+                            <label
+                                key={key}
+                                className="flex items-center justify-between rounded-lg border bg-muted/15 p-3"
+                            >
+                                <span className="text-sm font-medium">
+                                    {t(label)}
+                                </span>
+                                <input
+                                    type="checkbox"
+                                    checked={current}
+                                    onChange={(e) =>
+                                        toggle(key, e.target.checked)
+                                    }
+                                    className="size-4"
+                                />
+                            </label>
+                        );
+                    })}
+                </div>
+                <div className="flex justify-end">
+                    <Button type="submit" disabled={form.processing}>
+                        {t('Save integrations')}
+                    </Button>
+                </div>
+            </form>
+        </SectionShell>
+    );
+}
+
+type IntegrationCardRow = {
+    key: string;
+    name: string;
+    category: string;
+    tagline: string;
+    description: string;
+};
+
+function IntegrationCardsSection({
+    initial,
+}: {
+    initial: IntegrationCardRow[];
+}) {
+    const { t } = useT();
+    const form = useForm<{ integration_cards: IntegrationCardRow[] }>({
+        integration_cards: initial,
+    });
+
+    const updateField = (
+        index: number,
+        field: keyof Omit<IntegrationCardRow, 'key'>,
+        value: string,
+    ) => {
+        const next = form.data.integration_cards.map((row, i) =>
+            i === index ? { ...row, [field]: value } : row,
+        );
+        form.setData('integration_cards', next);
+    };
+
+    return (
+        <SectionShell
+            icon={Sparkles}
+            title={t('Integration card copy')}
+            description={t(
+                'Edit the name, category, tagline, and description of each card on the public /integrations page. Leave a field blank to fall back to the shipped default.',
+            )}
+        >
+            <form
+                onSubmit={(e) => {
+                    e.preventDefault();
+                    form.patch(
+                        updateSystemSettings({ section: 'integrations' }).url,
+                    );
+                }}
+                className="space-y-4"
+            >
+                <div className="space-y-4">
+                    {form.data.integration_cards.map((row, index) => (
+                        <div
+                            key={row.key}
+                            className="space-y-3 rounded-lg border bg-muted/15 p-4"
+                        >
+                            <div className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">
+                                {row.key}
+                            </div>
+                            <div className="grid gap-3 sm:grid-cols-2">
+                                <label className="space-y-1 text-sm">
+                                    <span className="font-medium">
+                                        {t('Name')}
+                                    </span>
+                                    <Input
+                                        value={row.name}
+                                        onChange={(e) =>
+                                            updateField(
+                                                index,
+                                                'name',
+                                                e.target.value,
+                                            )
+                                        }
+                                    />
+                                </label>
+                                <label className="space-y-1 text-sm">
+                                    <span className="font-medium">
+                                        {t('Category')}
+                                    </span>
+                                    <Input
+                                        value={row.category}
+                                        onChange={(e) =>
+                                            updateField(
+                                                index,
+                                                'category',
+                                                e.target.value,
+                                            )
+                                        }
+                                    />
+                                </label>
+                            </div>
+                            <label className="space-y-1 text-sm">
+                                <span className="font-medium">
+                                    {t('Tagline')}
+                                </span>
+                                <Input
+                                    value={row.tagline}
+                                    onChange={(e) =>
+                                        updateField(
+                                            index,
+                                            'tagline',
+                                            e.target.value,
+                                        )
+                                    }
+                                />
+                            </label>
+                            <label className="space-y-1 text-sm">
+                                <span className="font-medium">
+                                    {t('Description')}
+                                </span>
+                                <textarea
+                                    rows={3}
+                                    value={row.description}
+                                    onChange={(e) =>
+                                        updateField(
+                                            index,
+                                            'description',
+                                            e.target.value,
+                                        )
+                                    }
+                                    className="w-full rounded-md border bg-background p-2 text-sm"
+                                />
+                            </label>
+                        </div>
+                    ))}
+                </div>
+                <div className="flex justify-end">
+                    <Button type="submit" disabled={form.processing}>
+                        {t('Save card copy')}
+                    </Button>
+                </div>
+            </form>
         </SectionShell>
     );
 }
@@ -2488,11 +3966,15 @@ function PrivacySection({
     summary: PrivacySummary;
     initial: FormValues;
 }) {
+    const { t } = useT();
+
     return (
         <SectionShell
             icon={Shield}
-            title={__('Privacy & GDPR')}
-            description={__('Manage the public privacy policy and the GDPR request guidance shown on the marketing site.')}
+            title={t('Privacy & GDPR')}
+            description={t(
+                'Manage the public privacy policy and the GDPR request guidance shown on the marketing site.',
+            )}
             statusPill={<StatusPill configured={summary.customized} />}
         >
             <PrivacyPolicyEditor initial={initial.privacy_policy_content} />
@@ -2538,7 +4020,7 @@ function ReadOnlyHealthSection({
                             r.value === '' ||
                             r.value === undefined ? (
                                 <span className="text-muted-foreground/60">
-                                     — 
+                                    —
                                 </span>
                             ) : (
                                 r.value
@@ -2551,14 +4033,23 @@ function ReadOnlyHealthSection({
     );
 }
 
-type TabKey = 'billing' | 'ai' | 'mail' | 'cron' | 'health';
+type TabKey =
+    | 'billing'
+    | 'ai'
+    | 'mail'
+    | 'integrations'
+    | 'features'
+    | 'cron'
+    | 'health';
 
-const TABS: { key: TabKey; label: string; icon: LucideIcon }[] = [
-    { key: 'billing', label: __('Billing'), icon: CreditCard },
-    { key: 'ai', label: __('AI providers'), icon: Sparkles },
-    { key: 'mail', label: __('Mail'), icon: Mail },
-    { key: 'cron', label: __('Cron worker'), icon: Workflow },
-    { key: 'health', label: __('Health'), icon: HardDrive },
+const TAB_KEYS: TabKey[] = [
+    'billing',
+    'ai',
+    'mail',
+    'integrations',
+    'features',
+    'cron',
+    'health',
 ];
 
 export default function SystemSettings({
@@ -2566,9 +4057,24 @@ export default function SystemSettings({
     sections,
     form: initial,
 }: Props) {
+    const { t } = useT();
+
+    const TABS: { key: TabKey; label: string; icon: LucideIcon }[] = [
+        { key: 'billing', label: t('Billing'), icon: CreditCard },
+        { key: 'ai', label: t('AI providers'), icon: Sparkles },
+        { key: 'mail', label: t('Mail'), icon: Mail },
+        { key: 'integrations', label: t('Integrations'), icon: Workflow },
+        { key: 'features', label: t('Features'), icon: Sparkles },
+        { key: 'cron', label: t('Cron worker'), icon: Workflow },
+        { key: 'health', label: t('Health'), icon: HardDrive },
+    ];
+
+    // Persist the active tab in the URL hash so a refresh / share-link
+    // lands the visitor back where they were. Falls back to the first
+    // tab when the hash is missing or unknown.
     const initialTab: TabKey =
         typeof window !== 'undefined' &&
-        TABS.some((t) => t.key === window.location.hash.slice(1))
+        TAB_KEYS.includes(window.location.hash.slice(1) as TabKey)
             ? (window.location.hash.slice(1) as TabKey)
             : 'billing';
     const [active, setActive] = useState<TabKey>(initialTab);
@@ -2577,6 +4083,8 @@ export default function SystemSettings({
         setActive(key);
 
         if (typeof window !== 'undefined') {
+            // history.replaceState avoids polluting back/forward history
+            // with every tab click — refreshes still land on the right tab.
             window.history.replaceState(
                 null,
                 '',
@@ -2590,28 +4098,32 @@ export default function SystemSettings({
         { headTitle: string; title: string; description: string }
     > = {
         system: {
-            headTitle: __('System settings'),
-            title: __('System config'),
-            description:
-                __('Edit provider keys and run smoke tests. Sensitive values are encrypted at rest and never sent back to the browser; leave a secret blank to keep its current value.'),
+            headTitle: t('System settings'),
+            title: t('System config'),
+            description: t(
+                'Edit provider keys and run smoke tests. Sensitive values are encrypted at rest and never sent back to the browser; leave a secret blank to keep its current value.',
+            ),
         },
         branding: {
-            headTitle: __('Branding settings'),
-            title: __('Branding'),
-            description:
-                __('Manage the global site title, uploaded logos, favicon, and widget footer branding from one place.'),
+            headTitle: t('Branding settings'),
+            title: t('Branding'),
+            description: t(
+                'Manage the global site title, uploaded logos, favicon, and widget footer branding from one place.',
+            ),
         },
         marketing: {
-            headTitle: __('Marketing site settings'),
-            title: __('Marketing site'),
-            description:
-                __('Edit the landing page using structured fields so content stays easy to manage and review.'),
+            headTitle: t('Marketing site settings'),
+            title: t('Marketing site'),
+            description: t(
+                'Edit the landing page using structured fields so content stays easy to manage and review.',
+            ),
         },
         privacy: {
-            headTitle: __('Privacy settings'),
-            title: __('Privacy & GDPR'),
-            description:
-                __('Control the public privacy policy copy, contact details, and visitor rights guidance from the admin settings area.'),
+            headTitle: t('Privacy settings'),
+            title: t('Privacy & GDPR'),
+            description: t(
+                'Control the public privacy policy copy, contact details, and visitor rights guidance from the admin settings area.',
+            ),
         },
     };
 
@@ -2628,7 +4140,7 @@ export default function SystemSettings({
                 <div
                     className="mt-4 flex gap-1 overflow-x-auto border-b"
                     role="tablist"
-                    aria-label={__('System config sections')}
+                    aria-label={t('System config sections')}
                 >
                     {TABS.map((tab) => {
                         const Icon = tab.icon;
@@ -2681,18 +4193,53 @@ export default function SystemSettings({
 
                 {page === 'system' && active === 'ai' && (
                     <>
+                        <AzureFoundrySection
+                            summary={sections.llm}
+                            initial={initial}
+                        />
                         <CloudflareSection
                             summary={sections.llm}
                             initial={initial}
                         />
-                        <OpenAiSection initial={initial} />
-                        <OpenRouterSection initial={initial} />
+                        <OpenAiSection
+                            summary={sections.llm}
+                            initial={initial}
+                        />
+                        <OpenRouterSection
+                            summary={sections.llm}
+                            initial={initial}
+                        />
                         <RoutingSection initial={initial} />
+                        <ByokGlobalSection initial={initial} />
                     </>
                 )}
 
                 {page === 'system' && active === 'mail' && (
-                    <MailSection summary={sections.mail} initial={initial} />
+                    <>
+                        <MailSection
+                            summary={sections.mail}
+                            initial={initial}
+                        />
+                        <AdminDigestSection initial={initial} />
+                    </>
+                )}
+
+                {page === 'system' && active === 'integrations' && (
+                    <>
+                        <IntegrationsToggleSection
+                            initial={initial.integrations_enabled ?? {}}
+                        />
+                        <IntegrationCardsSection
+                            initial={initial.integration_cards ?? []}
+                        />
+                        <WordpressPluginSection initial={initial} />
+                    </>
+                )}
+
+                {page === 'system' && active === 'features' && (
+                    <>
+                        <SignupVerificationSection initial={initial} />
+                    </>
                 )}
 
                 {page === 'system' && active === 'cron' && (
@@ -2719,22 +4266,24 @@ export default function SystemSettings({
                     <>
                         <ReadOnlyHealthSection
                             icon={Sparkles}
-                            title={__('LLM (chat) probe')}
-                            description={__('Verifies the currently-resolved chat provider responds end-to-end.')}
+                            title={t('LLM (chat) probe')}
+                            description={t(
+                                'Verifies the currently-resolved chat provider responds end-to-end.',
+                            )}
                             statusPill={
                                 <StatusPill
                                     configured={sections.llm.configured}
                                 />
                             }
                             testEndpoint="/settings/system/test/llm"
-                            testLabel={__('Run chat probe')}
+                            testLabel={t('Run chat probe')}
                             rows={[
                                 {
                                     label: 'LLM_PROVIDER',
                                     value: sections.llm.provider_env,
                                 },
                                 {
-                                    label: __('Resolved'),
+                                    label: t('Resolved'),
                                     value: sections.llm.resolved,
                                 },
                             ]}
@@ -2742,18 +4291,20 @@ export default function SystemSettings({
 
                         <ReadOnlyHealthSection
                             icon={Sparkles}
-                            title={__('LLM (embed) probe')}
-                            description={__('Verifies the embed endpoint produces a vector.')}
+                            title={t('LLM (embed) probe')}
+                            description={t(
+                                'Verifies the embed endpoint produces a vector.',
+                            )}
                             statusPill={
                                 <StatusPill
                                     configured={sections.llm.configured}
                                 />
                             }
                             testEndpoint="/settings/system/test/embed"
-                            testLabel={__('Run embed probe')}
+                            testLabel={t('Run embed probe')}
                             rows={[
                                 {
-                                    label: __('Resolved'),
+                                    label: t('Resolved'),
                                     value: sections.llm.resolved,
                                 },
                             ]}
@@ -2761,26 +4312,28 @@ export default function SystemSettings({
 
                         <ReadOnlyHealthSection
                             icon={HardDrive}
-                            title={__('Cache (Redis)')}
-                            description={__('Backs queues, sessions, and short-TTL RAG history.')}
+                            title={t('Cache (Redis)')}
+                            description={t(
+                                'Backs queues, sessions, and short-TTL RAG history.',
+                            )}
                             statusPill={
                                 <StatusPill
                                     configured={sections.cache.configured}
                                 />
                             }
                             testEndpoint="/settings/system/test/cache"
-                            testLabel={__('Run write/read probe')}
+                            testLabel={t('Run write/read probe')}
                             rows={[
                                 {
-                                    label: __('Driver'),
+                                    label: t('Driver'),
                                     value: sections.cache.driver,
                                 },
                                 {
-                                    label: __('Redis host'),
+                                    label: t('Redis host'),
                                     value: sections.cache.redis_host,
                                 },
                                 {
-                                    label: __('Redis port'),
+                                    label: t('Redis port'),
                                     value: sections.cache.redis_port,
                                 },
                             ]}
@@ -2788,8 +4341,10 @@ export default function SystemSettings({
 
                         <ReadOnlyHealthSection
                             icon={Database}
-                            title={__('Vector store')}
-                            description={__('Embedding storage + similarity search. Provider auto-picks from configured keys.')}
+                            title={t('Vector store')}
+                            description={t(
+                                'Embedding storage + similarity search. Provider auto-picks from configured keys.',
+                            )}
                             statusPill={
                                 <StatusPill
                                     configured={sections.vector.configured}
@@ -2801,15 +4356,15 @@ export default function SystemSettings({
                                     value: sections.vector.provider_env,
                                 },
                                 {
-                                    label: __('Resolved'),
+                                    label: t('Resolved'),
                                     value: sections.vector.resolved,
                                 },
                                 {
-                                    label: __('Vectorize index'),
+                                    label: t('Vectorize index'),
                                     value: sections.vector.vectorize_index,
                                 },
                                 {
-                                    label: __('Qdrant URL'),
+                                    label: t('Qdrant URL'),
                                     value: sections.vector.qdrant_url,
                                 },
                             ]}
@@ -2817,8 +4372,10 @@ export default function SystemSettings({
 
                         <ReadOnlyHealthSection
                             icon={Radio}
-                            title={__('Reverb (WebSocket)')}
-                            description={__('Live broadcasts for the inbox + widget human-takeover.')}
+                            title={t('Reverb (WebSocket)')}
+                            description={t(
+                                'Live broadcasts for the inbox + widget human-takeover.',
+                            )}
                             statusPill={
                                 <StatusPill
                                     configured={sections.reverb.configured}
@@ -2826,13 +4383,19 @@ export default function SystemSettings({
                             }
                             rows={[
                                 {
-                                    label: __('App key'),
+                                    label: t('App key'),
                                     value: sections.reverb.app_key,
                                 },
-                                { label: __('Host'), value: sections.reverb.host },
-                                { label: __('Port'), value: sections.reverb.port },
                                 {
-                                    label: __('Scheme'),
+                                    label: t('Host'),
+                                    value: sections.reverb.host,
+                                },
+                                {
+                                    label: t('Port'),
+                                    value: sections.reverb.port,
+                                },
+                                {
+                                    label: t('Scheme'),
                                     value: sections.reverb.scheme,
                                 },
                             ]}
@@ -2847,7 +4410,7 @@ export default function SystemSettings({
 SystemSettings.layout = {
     breadcrumbs: [
         {
-            title: __('System config'),
+            title: 'System config',
             href: '/settings/system',
         },
     ],

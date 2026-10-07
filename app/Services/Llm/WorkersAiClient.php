@@ -27,6 +27,18 @@ class WorkersAiClient implements OpenAiClient
 
     private string $baseUri;
 
+    /**
+     * Per-call request timeouts (seconds), overriding the client default of
+     * 60. Blocking calls must FAIL FAST so {@see FailoverOpenAiClient} can
+     * reach the next provider quickly — a tool decision or an embed has no
+     * business taking a full minute. streamChat keeps the 60s client default
+     * because a legitimate long answer holds the connection open;
+     * connect_timeout (5s) still catches a dead provider fast either way.
+     */
+    private const TOOL_TIMEOUT = 25;
+
+    private const EMBED_TIMEOUT = 12;
+
     public function __construct(
         private readonly string $accountId,
         private readonly string $apiToken,
@@ -49,7 +61,7 @@ class WorkersAiClient implements OpenAiClient
     {
         return [
             'Authorization' => "Bearer {$this->apiToken}",
-            'User-Agent' => 'orbychat/1.0',
+            'User-Agent' => 'orby/1.0',
         ];
     }
 
@@ -78,6 +90,11 @@ class WorkersAiClient implements OpenAiClient
             throw match (true) {
                 $code === 429 => new OpenAiRateLimitException("Workers AI 429: {$body}"),
                 $code === 408 || $code === 504 => new OpenAiTimeoutException("Workers AI timeout: {$body}"),
+                // 5xx = provider/origin down (Cloudflare 520-527, 500/502/503).
+                // RETRYABLE — not our fault, so FailoverOpenAiClient should
+                // try the next provider. Must come before the 4xx default,
+                // which is a genuine client error nobody can retry away.
+                $code >= 500 => new OpenAiException("Workers AI {$code}: {$body}"),
                 default => new OpenAiBadRequestException("Workers AI {$code}: {$body}"),
             };
         }
@@ -90,24 +107,102 @@ class WorkersAiClient implements OpenAiClient
                 $line = substr($buffer, 0, $pos);
                 $buffer = substr($buffer, $pos + 1);
                 $line = trim($line);
-                if ($line === '' || ! str_starts_with($line, 'data:')) {
+                if ($line === '') {
                     continue;
                 }
+
+                // Cloudflare Workers AI's `/v1/chat/completions` mostly
+                // emits OpenAI-style SSE (`data: {...}` lines), but a
+                // handful of model families default to the native CF AI
+                // streaming shape — NDJSON without the `data:` prefix —
+                // and others mix the two. Buyer report 2026-05-29: any
+                // non-Llama CLOUDFLARE_CHAT_MODEL emitted zero tokens
+                // because the parser skipped every non-`data:` line.
+                //
+                // Handle both shapes here. Pre-fix this branch hard-
+                // skipped non-`data:` lines.
+                if (! str_starts_with($line, 'data:')) {
+                    foreach ($this->extractTokenFromShape($line) as $token) {
+                        yield $token;
+                    }
+
+                    continue;
+                }
+
                 $payload = trim(substr($line, 5));
                 if ($payload === '' || $payload === '[DONE]') {
                     continue;
                 }
 
-                $decoded = json_decode($payload, true);
-                if (! is_array($decoded)) {
-                    continue;
+                foreach ($this->extractTokenFromShape($payload) as $token) {
+                    yield $token;
                 }
-                $delta = $decoded['choices'][0]['delta']['content'] ?? null;
-                if ($delta === null || $delta === '' || $delta === 0 || $delta === '0') {
-                    continue;
-                }
-                yield (string) $delta;
             }
+        }
+    }
+
+    /**
+     * Decode a single SSE payload or NDJSON line into yielded text
+     * tokens, covering every shape Cloudflare Workers AI emits across
+     * its model catalog:
+     *
+     *   - OpenAI-compat streaming delta:
+     *       {"choices":[{"delta":{"content":"hello"}}]}
+     *   - OpenAI-compat multi-modal delta (Llama 3.3 quirk):
+     *       {"choices":[{"delta":{"content":[{"type":"text","text":"hi"}]}}]}
+     *   - OpenAI-compat non-streaming fallback (some models reply with
+     *     a single message chunk):
+     *       {"choices":[{"message":{"content":"hello"}}]}
+     *   - CF native NDJSON:
+     *       {"response":"hello","p":""}
+     *
+     * Yields nothing for unparseable lines, [DONE], or empty content.
+     *
+     * @return \Generator<int, string>
+     */
+    private function extractTokenFromShape(string $payload): \Generator
+    {
+        $decoded = json_decode($payload, true);
+        if (! is_array($decoded)) {
+            return;
+        }
+
+        $candidates = [
+            $decoded['choices'][0]['delta']['content'] ?? null,
+            $decoded['choices'][0]['message']['content'] ?? null,
+            $decoded['response'] ?? null,
+        ];
+
+        foreach ($candidates as $delta) {
+            if ($delta === null || $delta === '' || $delta === 0 || $delta === '0') {
+                continue;
+            }
+
+            // OpenAI multi-modal shape:
+            // `[{type:'text', text:'...'}, ...]`. A plain
+            // `(string) $delta` triggers PHP's "Array to string
+            // conversion" warning which our error handler turns
+            // into ErrorException → SSE stream dies. Flatten array
+            // parts into their text payloads instead.
+            if (is_array($delta)) {
+                $flattened = '';
+                foreach ($delta as $part) {
+                    if (is_string($part)) {
+                        $flattened .= $part;
+                    } elseif (is_array($part) && isset($part['text']) && is_string($part['text'])) {
+                        $flattened .= $part['text'];
+                    }
+                }
+                if ($flattened !== '') {
+                    yield $flattened;
+                }
+
+                return;
+            }
+
+            yield (string) $delta;
+
+            return;
         }
     }
 
@@ -134,6 +229,10 @@ class WorkersAiClient implements OpenAiClient
                 'headers' => $this->authHeaders(),
                 'json' => $payload,
                 'http_errors' => false,
+                // Per-call override lets latency-sensitive callers (the
+                // query rewriter) fail fast and fall back rather than stall
+                // the stream for the full 25s tool budget.
+                'timeout' => $opts['timeout'] ?? self::TOOL_TIMEOUT,
             ]);
         } catch (RequestException $e) {
             throw $this->translateException($e);
@@ -145,6 +244,11 @@ class WorkersAiClient implements OpenAiClient
             throw match (true) {
                 $code === 429 => new OpenAiRateLimitException("Workers AI 429: {$body}"),
                 $code === 408 || $code === 504 => new OpenAiTimeoutException("Workers AI timeout: {$body}"),
+                // 5xx = provider/origin down (Cloudflare 520-527, 500/502/503).
+                // RETRYABLE — not our fault, so FailoverOpenAiClient should
+                // try the next provider. Must come before the 4xx default,
+                // which is a genuine client error nobody can retry away.
+                $code >= 500 => new OpenAiException("Workers AI {$code}: {$body}"),
                 default => new OpenAiBadRequestException("Workers AI {$code}: {$body}"),
             };
         }
@@ -188,6 +292,7 @@ class WorkersAiClient implements OpenAiClient
                     'input' => $inputs,
                 ],
                 'http_errors' => false,
+                'timeout' => self::EMBED_TIMEOUT,
             ]);
         } catch (RequestException $e) {
             throw $this->translateException($e);
@@ -195,9 +300,11 @@ class WorkersAiClient implements OpenAiClient
 
         $code = $response->getStatusCode();
         $body = (string) $response->getBody();
-
         if ($code >= 400) {
-            throw new OpenAiBadRequestException("Workers AI embed {$code}: {$body}");
+            // 5xx is a retryable provider outage; 4xx is a real client error.
+            throw $code >= 500
+                ? new OpenAiException("Workers AI embed {$code}: {$body}")
+                : new OpenAiBadRequestException("Workers AI embed {$code}: {$body}");
         }
 
         $decoded = json_decode($body, true);

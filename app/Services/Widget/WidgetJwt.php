@@ -15,9 +15,10 @@ class WidgetJwt
     ) {}
 
     /**
+     * @param  array{wp_user_id:string, email_hash?:string, source:string}|null  $shopper  Optional CMS-resolved visitor identity (today: the WordPress plugin).
      * @return array{token: string, expires_at: int}
      */
-    public function issue(string $agentId, string $visitorId, string $conversationId): array
+    public function issue(string $agentId, string $visitorId, string $conversationId, ?array $shopper = null): array
     {
         $now = time();
         $exp = $now + ($this->ttlMinutes * 60);
@@ -29,6 +30,14 @@ class WidgetJwt
             'visitor_id' => $visitorId,
             'conversation_id' => $conversationId,
         ];
+
+        if ($shopper !== null) {
+            $payload['shopper'] = [
+                'wp_user_id' => (string) ($shopper['wp_user_id'] ?? ''),
+                'email_hash' => (string) ($shopper['email_hash'] ?? ''),
+                'source' => (string) ($shopper['source'] ?? 'wordpress'),
+            ];
+        }
 
         return [
             'token' => JWT::encode($payload, $this->secret, 'HS256'),

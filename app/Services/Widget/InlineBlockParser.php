@@ -35,19 +35,20 @@ class InlineBlockParser
         'pricing' => 'pricing_card',
         'case-study' => 'case_study_card',
         'coupon' => 'coupon_card',
-        'order-status' => 'order_status_card',
-        'appointment' => 'appointment_card',
-        'treatment' => 'treatment_card',
-        'health-plan' => 'health_plan_card',
-        'code' => 'code_block',
-        'api-ref' => 'api_ref_card',
-        'version' => 'version_picker',
-        'troubleshoot' => 'troubleshoot_card',
-        'kb-article' => 'kb_article_card',
-        'ticket' => 'ticket_escalation',
-        'account-status' => 'account_status_card',
-        'signup' => 'signup_card',
-        'escalate' => 'escalation_button',
+        // Follow-up suggestions the LLM emits after its answer:
+        //   <suggestions q1="..." q2="..." q3="..."/>
+        // Widget renders these as tappable chips that re-send each
+        // suggestion as the next visitor turn.
+        'suggestions' => 'suggestion_chips',
+        // In-chat Stripe Checkout block:
+        //   <checkout title="..." amount="49" currency="USD"
+        //             description="..." product_id="prod_..."/>
+        // Widget renders a Pay-now card; clicking it opens a hosted
+        // Stripe Checkout session (or inline Stripe Elements when the
+        // agent has `in_chat_payments_inline=true`). Capability-gated
+        // server-side — only emitted when the agent has the
+        // `in_chat_payments` capability AND a Stripe key is wired.
+        'checkout' => 'checkout_card',
     ];
 
     /**
@@ -57,21 +58,10 @@ class InlineBlockParser
      *
      * @return array{text: string, blocks: array<int, array{type: string, payload: array<string, string>}>}
      */
-    public function extract(string $text, ?string $evidence = null): array
+    public function extract(string $text): array
     {
         $blocks = [];
 
-        // 4. Follow-up suggestions (resilient to minor typos)
-        preg_match_all('/<(follow-up|follw-up|follou-up|followup)>(.*?)<\/(follow-up|follw-up|follou-up|followup)>/is', $text, $matches, PREG_SET_ORDER);
-        foreach ($matches as $match) {
-            $blocks[] = [
-                'type' => 'follow_up',
-                'payload' => ['question' => trim($match[2])],
-            ];
-        }
-        $text = preg_replace('/<(follow-up|follw-up|follou-up|followup)>.*?<\/(follow-up|follw-up|follou-up|followup)>/is', '', $text);
-
-        // 2. Extract self-closing XML-style tags
         foreach (self::BLOCK_TYPES as $tag => $blockType) {
             // Match self-closing XML-style tags. Tolerant: allows newlines
             // inside attribute lists, single OR double quotes, and an
@@ -85,12 +75,6 @@ class InlineBlockParser
                 if ($attrs === []) {
                     continue;
                 }
-                if (! $this->blockHasEvidence($blockType, $attrs, $evidence)) {
-                    $text = str_replace($m[0], '', $text);
-
-                    continue;
-                }
-
                 $blocks[] = ['type' => $blockType, 'payload' => $attrs];
                 $text = str_replace($m[0], '', $text);
             }
@@ -103,84 +87,6 @@ class InlineBlockParser
         $text = trim($text);
 
         return ['text' => $text, 'blocks' => $blocks];
-    }
-
-    /**
-     * @param  array<string, string>  $attrs
-     */
-    private function blockHasEvidence(string $blockType, array $attrs, ?string $evidence): bool
-    {
-        if ($evidence === null || trim($evidence) === '') {
-            return true;
-        }
-
-        if (isset($attrs['url']) && trim($attrs['url']) !== '' && ! $this->urlAppearsInEvidence($attrs['url'], $evidence)) {
-            return false;
-        }
-
-        if (isset($attrs['href']) && trim($attrs['href']) !== '' && ! $this->urlAppearsInEvidence($attrs['href'], $evidence)) {
-            return false;
-        }
-
-        $needsPriceEvidence = in_array($blockType, ['pricing_card', 'product_card'], true)
-            && isset($attrs['price'])
-            && trim($attrs['price']) !== '';
-
-        if (! $needsPriceEvidence) {
-            return true;
-        }
-
-        return $this->priceAppearsInEvidence($attrs['price'], $evidence);
-    }
-
-    private function priceAppearsInEvidence(string $price, string $evidence): bool
-    {
-        $price = trim($price);
-        if ($price === '') {
-            return false;
-        }
-
-        $normalizedPrice = preg_replace('/[^\d.,]/u', '', $price) ?? '';
-        if ($normalizedPrice === '') {
-            return false;
-        }
-
-        $variants = array_values(array_unique(array_filter([
-            $price,
-            $normalizedPrice,
-            str_replace(',', '.', $normalizedPrice),
-            str_replace('.', ',', $normalizedPrice),
-        ])));
-
-        foreach ($variants as $variant) {
-            if ($variant !== '' && mb_stripos($evidence, $variant) !== false) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private function urlAppearsInEvidence(string $url, string $evidence): bool
-    {
-        $url = trim($url);
-        if ($url === '' || str_starts_with($url, '#')) {
-            return false;
-        }
-
-        $variants = array_values(array_unique(array_filter([
-            $url,
-            html_entity_decode($url, ENT_QUOTES | ENT_HTML5),
-            rtrim($url, '/'),
-        ])));
-
-        foreach ($variants as $variant) {
-            if ($variant !== '' && mb_stripos($evidence, $variant) !== false) {
-                return true;
-            }
-        }
-
-        return false;
     }
 
     /**

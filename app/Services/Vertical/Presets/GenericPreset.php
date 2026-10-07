@@ -19,15 +19,15 @@ class GenericPreset implements VerticalPreset
 
     public function label(): string
     {
-        return __('Generic');
+        return 'Generic';
     }
 
     public function shortDescription(): string
     {
-        return __("I'll configure this myself");
+        return "I'll configure this myself";
     }
 
-    public function systemPromptFragment(\App\Models\Agent $agent): string
+    public function systemPromptFragment(): string
     {
         return '';
     }
@@ -49,7 +49,9 @@ class GenericPreset implements VerticalPreset
 
     public function capabilities(): array
     {
-        return [];
+        return [
+            'ticket_escalation',
+        ];
     }
 
     public function retrievalTuning(): array
@@ -58,15 +60,5 @@ class GenericPreset implements VerticalPreset
             'boost_keywords' => [],
             'chunk_overlap_bias' => 0.0,
         ];
-    }
-
-    public function leadFormFields(): ?array
-    {
-        return null;
-    }
-
-    public function sampleAnswer(): string
-    {
-        return __('Hello! I\'m here to help you with any questions you have about our products or services. Feel free to ask anything!');
     }
 }

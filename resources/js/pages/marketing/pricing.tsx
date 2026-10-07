@@ -80,20 +80,24 @@ function FaqItem({ q, a }: Faq) {
 
 export default function Pricing({
     shell,
-    brand,
-    plans,
-    matrix,
-    faqs,
-    contact_email,
+    brand = 'OrbyChat',
+    plans = [],
+    matrix = [],
+    faqs = [],
+    contact_email = '',
 }: Props) {
     const [interval, setInterval] = useState<Interval>('month');
 
-    const hasAnnualOption = plans.some(
+    const safePlans = plans ?? [];
+    const safeMatrix = matrix ?? [];
+    const safeFaqs = faqs ?? [];
+
+    const hasAnnualOption = safePlans.some(
         (p) => p.yearly_price > 0 && p.monthly_price > 0,
     );
 
     const annualSavingsPercent = (() => {
-        const candidate = plans.find(
+        const candidate = safePlans.find(
             (p) => p.monthly_price > 0 && p.yearly_price > 0,
         );
 
@@ -178,20 +182,20 @@ export default function Pricing({
 
                 <section className="mx-auto max-w-6xl px-6 pb-12">
                     <div className="grid gap-6 md:grid-cols-3">
-                        {plans.map((plan) => {
+                        {safePlans.map((plan) => {
                             const showYearly =
-                                interval === 'year' && plan.yearly_price > 0;
+                                interval === 'year' && (plan.yearly_price ?? 0) > 0;
                             const headlinePrice = showYearly
-                                ? Math.round(plan.yearly_price / 12)
-                                : plan.monthly_price;
+                                ? Math.round((plan.yearly_price ?? 0) / 12)
+                                : (plan.monthly_price ?? 0);
                             const ctaHref =
-                                interval === 'year' && plan.yearly_price > 0
-                                    ? plan.cta_href +
-                                      (plan.cta_href.includes('?')
+                                interval === 'year' && (plan.yearly_price ?? 0) > 0
+                                    ? (plan.cta_href ?? '/register') +
+                                      ((plan.cta_href ?? '/register').includes('?')
                                           ? '&'
                                           : '?') +
                                       'interval=year'
-                                    : plan.cta_href;
+                                    : (plan.cta_href ?? '/register');
 
                             return (
                                 <div
@@ -214,7 +218,7 @@ export default function Pricing({
                                             {__(plan.name)}
                                         </h3>
                                         <p className="mt-1 text-sm text-slate-500">
-                                            {__(plan.tagline)}
+                                            {__(plan.tagline ?? '')}
                                         </p>
                                     </div>
 
@@ -228,17 +232,17 @@ export default function Pricing({
                                             </span>
                                         )}
                                     </div>
-                                    {showYearly && plan.yearly_price > 0 && (
+                                    {showYearly && (plan.yearly_price ?? 0) > 0 && (
                                         <p className="mt-1 text-xs text-slate-500">
                                             {__('$:price billed annually', { price: plan.yearly_price })}
                                         </p>
                                     )}
                                     <p className="mt-2 text-sm font-medium text-slate-700">
-                                        {__(plan.volume)}
+                                        {__(plan.volume ?? '')}
                                     </p>
 
                                     <ul className="mt-6 flex-1 space-y-3 text-sm text-slate-700">
-                                        {plan.features.map((feature) => (
+                                        {(plan.features ?? []).map((feature) => (
                                             <li
                                                 key={feature}
                                                 className="flex items-start gap-2"
@@ -307,7 +311,7 @@ export default function Pricing({
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    {matrix.map((row) => (
+                                    {safeMatrix.map((row) => (
                                         <tr
                                             key={row.label}
                                             className="text-slate-700"
@@ -339,7 +343,7 @@ export default function Pricing({
                         {__('Frequently asked')}
                     </h2>
                     <div className="mt-10 grid gap-4">
-                        {faqs.map((faq) => (
+                        {safeFaqs.map((faq) => (
                             <FaqItem key={faq.q} q={__(faq.q)} a={__(faq.a)} />
                         ))}
                     </div>

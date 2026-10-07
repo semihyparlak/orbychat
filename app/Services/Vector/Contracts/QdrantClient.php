@@ -18,4 +18,12 @@ interface QdrantClient
     public function deleteByFilter(string $collection, array $filter): void;
 
     public function ensureCollection(string $name, int $dim, string $distance = 'Cosine'): void;
+
+    /**
+     * Hard-delete an index. Used by the rebuild-index recovery flow
+     * when the operator changed embedding models and needs to re-
+     * provision the index at the new dimension. Idempotent: missing
+     * indexes are not an error.
+     */
+    public function dropCollection(string $name): void;
 }

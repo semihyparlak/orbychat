@@ -7,6 +7,7 @@ use App\Models\Agent;
 use App\Models\Document;
 use App\Models\Source;
 use App\Support\CanonicalUrl;
+use App\Support\UrlSafetyGuard;
 use Illuminate\Support\Facades\Cache;
 
 /**
@@ -30,28 +31,7 @@ class AutoIndexPageVisit
 {
     public const MAX_PER_HOUR = 30;
 
-    /**
-     * Hostnames we refuse to crawl, regardless of allowed_origins.
-     * Defense-in-depth against an owner accidentally listing an
-     * internal/private host: even if the origin check passes, we won't
-     * dispatch a crawl for these. Cloudflare Browser Rendering would
-     * resolve the hostname remotely so this isn't a classic SSRF on
-     * OUR server, but we still don't want to index intranet pages.
-     */
-    private const PRIVATE_HOST_PATTERNS = [
-        '#^localhost$#i',
-        '#^127\.#',
-        '#^10\.#',
-        '#^192\.168\.#',
-        '#^172\.(1[6-9]|2[0-9]|3[01])\.#',
-        '#^169\.254\.#',     // link-local
-        '#^0\.#',            // 0.0.0.0/8
-        '#^::1$#',           // IPv6 loopback
-        '#^fe80:#i',         // IPv6 link-local
-        '#^fc00:#i',         // IPv6 ULA
-        '#\.local$#i',
-        '#\.internal$#i',
-    ];
+    public function __construct(private readonly UrlSafetyGuard $guard = new UrlSafetyGuard) {}
 
     /**
      * Path patterns we never auto-index — high false-positive rate for
@@ -74,16 +54,6 @@ class AutoIndexPageVisit
         '#/settings(/|$)#i',
         '#/password(/|$)#i',
         '#/auth(/|$)#i',
-        '#/apple-app-site-association$#i',
-        '#/\.well-known(/|$)#i',
-        '#/robots\.txt$#i',
-        '#/sitemap\.xml$#i',
-        '#/ads\.txt$#i',
-        '#/humans\.txt$#i',
-        '#/favicon\.ico$#i',
-        '#\.(?:json|xml|yaml|yml|js|css|map)$#i',
-        '#/api(/|$)#i',
-        '#/wp-json(/|$)#i',
     ];
 
     /**
@@ -120,10 +90,6 @@ class AutoIndexPageVisit
             return false;
         }
 
-        if ($this->pathIsRestricted($normalized, $agent)) {
-            return false;
-        }
-
         if ($this->alreadyIndexed($agent->id, $normalized)) {
             return false;
         }
@@ -149,26 +115,17 @@ class AutoIndexPageVisit
     }
 
     /**
-     * Block private/internal hosts even if the owner listed them in
-     * allowed_origins. Cloudflare Browser Rendering would resolve and
-     * fetch from its own egress IPs, so this isn't a classic SSRF on
-     * us — but we still don't want to ingest intranet pages.
+     * Block private / internal / loopback / link-local / cloud-metadata
+     * hosts. Delegates to the shared UrlSafetyGuard so the auto-index
+     * path, the explicit Add-Source path, and the PlainHttpCrawler
+     * fallback all agree on what "unsafe" means. Cloudflare Browser
+     * Rendering resolves and fetches from its own egress, so SSRF on
+     * our server isn't the only concern — we also don't want to
+     * ingest intranet pages into a workspace's knowledge base.
      */
     private function hostIsPrivate(string $url): bool
     {
-        $host = parse_url($url, PHP_URL_HOST);
-        if (! is_string($host) || $host === '') {
-            return true;
-        }
-        // parse_url keeps IPv6 brackets — strip them so [::1] matches ::1.
-        $host = trim($host, '[]');
-        foreach (self::PRIVATE_HOST_PATTERNS as $pattern) {
-            if (preg_match($pattern, $host) === 1) {
-                return true;
-            }
-        }
-
-        return false;
+        return ! $this->guard->isSafe($url);
     }
 
     private function originAllowed(string $url, Agent $agent, ?string $requestOrigin = null): bool
@@ -233,40 +190,6 @@ class AutoIndexPageVisit
         foreach (self::SKIP_PATH_PATTERNS as $pattern) {
             if (preg_match($pattern, $path) === 1) {
                 return true;
-            }
-        }
-
-        return false;
-    }
-
-    private function pathIsRestricted(string $url, Agent $agent): bool
-    {
-        $path = parse_url($url, PHP_URL_PATH) ?: '/';
-        $restricted = (array) ($agent->restricted_paths ?? []);
-        foreach ($restricted as $pattern) {
-            $pattern = trim((string) $pattern);
-            if ($pattern === '') {
-                continue;
-            }
-
-            // Simple prefix match if it doesn't look like a regex.
-            if (! str_starts_with($pattern, '#') && ! str_starts_with($pattern, '/')) {
-                if (str_starts_with($path, $pattern)) {
-                    return true;
-                }
-                continue;
-            }
-
-            // Try regex match.
-            try {
-                if (preg_match($pattern, $path) === 1) {
-                    return true;
-                }
-            } catch (\Throwable) {
-                // If it's a malformed regex, fall back to prefix match.
-                if (str_contains($path, $pattern)) {
-                    return true;
-                }
             }
         }
 
@@ -350,7 +273,7 @@ class AutoIndexPageVisit
             'agent_id' => $agent->id,
             'type' => 'auto',
             'status' => 'crawling',
-            'config' => ['label' => __('Auto-indexed from visitors')],
+            'config' => ['label' => 'Auto-indexed from visitors'],
         ]);
     }
 }

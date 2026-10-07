@@ -11,6 +11,7 @@ use App\Jobs\Rag\PersistTurnJob;
 use App\Models\Conversation;
 use App\Services\Llm\Contracts\OpenAiClient;
 use App\Services\Llm\Exceptions\OpenAiException;
+use App\Services\Triggers\HumanIntentDetector;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Str;
 
@@ -29,6 +30,8 @@ class RagPipeline
         private readonly PromptBuilder $prompt,
         private readonly CuratedAnswerMatcher $curated,
         private readonly OpenAiClient $llm,
+        private readonly HumanIntentDetector $humanIntent,
+        private readonly QueryRewriter $queryRewriter,
     ) {}
 
     /**
@@ -44,6 +47,35 @@ class RagPipeline
 
         $userMessageId = (string) Str::uuid7();
         $assistantMessageId = (string) Str::uuid7();
+
+        // 1a. Human-intent short-circuit. Mirror of MessageStreamController's
+        // 1c block: when the visitor explicitly asks for a human, return
+        // the escalation_button block + a short confirmation and skip
+        // retrieval + LLM. Same payload shape so the widget renders the
+        // button identically across the streaming and JSON paths.
+        if ($this->humanIntent->matches($userMessage)) {
+            $reply = 'Connecting you with a human. Tap the button below to request a takeover — an agent will join the chat as soon as one is available.';
+            foreach ($this->tokenize($reply) as $tok) {
+                event(new TokenStreamed($conversationId, $assistantMessageId, $tok));
+            }
+            event(new TurnCompleted($conversationId, $assistantMessageId, $reply));
+            $this->afterTurn($conversation, $userMessageId, $userMessage, $assistantMessageId, $reply, [], 1.0, $started, 'human-intent', $isPlayground, lowConfidence: false);
+
+            return [
+                'message_id' => $assistantMessageId,
+                'text' => $reply,
+                'citations' => [],
+                'low_confidence' => false,
+                'latency_ms' => (int) (microtime(true) * 1000) - $started,
+                'blocks' => [[
+                    'type' => 'escalation_button',
+                    'payload' => [
+                        'label' => 'Connect me with a human',
+                        'reason' => 'Visitor explicitly requested a human.',
+                    ],
+                ]],
+            ];
+        }
 
         // 1. Curated answer short-circuit
         $curatedAnswer = $this->curated->match($agent->id, $userMessage, $conversation->lang);
@@ -71,7 +103,11 @@ class RagPipeline
         $currentPageUrl = is_array($pageContext) && isset($pageContext['url']) && is_string($pageContext['url'])
             ? $pageContext['url']
             : $conversation->page_url;
-        $retrieval = $this->retriever->retrieve($agent->id, $userMessage, $threshold, 6, $currentPageUrl);
+        // Standalone-query rewrite (LLM when enabled, heuristic otherwise) —
+        // twin of MessageStreamController.
+        $priorHistory = Cache::get("conv:{$conversationId}:history", []);
+        $retrievalQueryText = $this->queryRewriter->rewrite($userMessage, is_array($priorHistory) ? $priorHistory : [], $conversationId);
+        $retrieval = $this->retriever->retrieve($agent->id, $retrievalQueryText, $threshold, 6, $currentPageUrl);
         $sources = $retrieval['chunks'];
         // Confidence: pick the strongest grounding signal (retrieved
         // similarity OR page-context baseline 0.85). Old hardcoded
@@ -249,7 +285,14 @@ class RagPipeline
         );
 
         if ($lowConfidence || $this->looksLikeFailure($assistantText)) {
-            DetectGapJob::dispatch($conversation->agent_id, $userMessage);
+            // Inline, like PersistTurnJob above: Content Gaps must not be
+            // lost when the `analytics` queue is unworked. The ShouldQueue
+            // notification inside DetectGapJob stays async.
+            try {
+                DetectGapJob::dispatchSync($conversation->agent_id, $userMessage);
+            } catch (\Throwable $e) {
+                report($e);
+            }
         }
 
         if (! $isPlayground) {

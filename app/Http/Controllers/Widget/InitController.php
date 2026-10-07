@@ -2,16 +2,22 @@
 
 namespace App\Http\Controllers\Widget;
 
+use App\Jobs\Analytics\RecomputeLeadScoreJob;
 use App\Models\Agent;
 use App\Models\Conversation;
 use App\Models\Lead;
 use App\Models\Message;
 use App\Models\Visitor;
+use App\Models\VisitorPageView;
 use App\Models\Workspace;
 use App\Services\Billing\MeteredBilling;
 use App\Services\Crawl\AutoIndexPageVisit;
+use App\Services\I18n\LocaleResolver;
+use App\Services\I18n\TranslationLoader;
 use App\Services\Vertical\VerticalPresetRegistry;
 use App\Services\Widget\AcceptLanguage;
+use App\Services\Widget\ShopperToken;
+use App\Services\Widget\WidgetCopy;
 use App\Services\Widget\WidgetJwt;
 use App\Support\AppBranding;
 use Illuminate\Http\JsonResponse;
@@ -24,6 +30,9 @@ class InitController
         private WidgetJwt $jwt,
         private MeteredBilling $billing,
         private AutoIndexPageVisit $autoIndex,
+        private LocaleResolver $localeResolver,
+        private WidgetCopy $widgetCopy,
+        private TranslationLoader $translations,
     ) {}
 
     public function __invoke(Request $request): JsonResponse
@@ -32,6 +41,17 @@ class InitController
             'agent_id' => ['required', 'string'],
             'page_url' => ['nullable', 'string', 'max:2000'],
             'anon_id' => ['nullable', 'string', 'max:64'],
+            // Optional CMS-signed shopper token. WordPress plugin emits
+            // it via `data-shopper-token` when a WC customer is logged
+            // in; widget forwards it here. Bad signatures are silently
+            // dropped — visitor still chats as anonymous.
+            'shopper_token' => ['nullable', 'string', 'max:2000'],
+            'page_title' => ['nullable', 'string', 'max:500'],
+            'referrer' => ['nullable', 'string', 'max:2000'],
+            // Host page's language — the embed's `data-locale`, else the
+            // page's `<html lang>`. Drives the widget UI locale so the
+            // chat follows the site's selected language.
+            'locale' => ['nullable', 'string', 'max:12'],
         ]);
 
         /** @var Agent|null $agent */
@@ -90,14 +110,20 @@ class InitController
             ])->save();
         }
 
-        // Force the app locale to match the agent's configured language.
-        // We set it on both the app and the translator to be absolutely sure.
-        $lang = strtolower($agent->language_default ?: 'en');
-        app()->setLocale($lang);
-        config(['app.locale' => $lang]);
-        if (app()->bound('translator')) {
-            app('translator')->setLocale($lang);
-        }
+        $detectedLang = AcceptLanguage::detect(
+            $request->headers->get('Accept-Language'),
+            fallback: $agent->language_default,
+        );
+        // Pick the widget UI locale: the host page's language wins (so the
+        // chat follows the site's selected language), then the agent's
+        // configured default, then the visitor's browser preferences. Same
+        // `lang/{locale}.json` translations the admin SPA uses — translators
+        // only maintain one dictionary.
+        $widgetLocale = $this->localeResolver->forWidget(
+            $request,
+            $agent->language_default,
+            is_string($data['locale'] ?? null) ? $data['locale'] : null,
+        );
 
         // Resume the visitor's most recent conversation if it's still
         // active (last activity in the past 24h, not claimed by a human
@@ -118,7 +144,7 @@ class InitController
                 'visitor_id' => $visitor->id,
                 'page_url' => $data['page_url'] ?? null,
                 'started_at' => now(),
-                'lang' => $lang,
+                'lang' => $detectedLang,
             ]);
         } elseif (is_string($data['page_url'] ?? null) && $data['page_url'] !== $conversation->page_url) {
             // Visitor came back on a different page within the resume
@@ -140,7 +166,64 @@ class InitController
             }
         }
 
-        $issued = $this->jwt->issue($agent->id, $visitor->id, $conversation->id);
+        // Trajectory capture. One row per /init call (== one row per
+        // top-level page navigation, since the widget calls /init on
+        // every page load). Feeds the LeadScoringEngine. Single indexed
+        // insert; safe on this endpoint because /init is NOT the
+        // streaming hot path. Deduped on same-page resume to avoid
+        // double-counting an A/B test reload or a Vite HMR refresh.
+        $pageUrlForView = is_string($data['page_url'] ?? null) ? trim($data['page_url']) : '';
+        if ($pageUrlForView !== '') {
+            $lastView = VisitorPageView::query()->withoutWorkspaceScope()
+                ->where('visitor_id', $visitor->id)
+                ->where('url', mb_substr($pageUrlForView, 0, 500))
+                ->orderByDesc('viewed_at')
+                ->first();
+            $dedupeWindow = now()->subMinutes(2);
+            $shouldRecord = $lastView === null || $lastView->viewed_at?->lt($dedupeWindow);
+
+            if ($shouldRecord) {
+                VisitorPageView::create([
+                    'workspace_id' => $agent->workspace_id,
+                    'agent_id' => $agent->id,
+                    'visitor_id' => $visitor->id,
+                    'conversation_id' => $conversation->id,
+                    'url' => mb_substr($pageUrlForView, 0, 500),
+                    'title' => is_string($data['page_title'] ?? null)
+                        ? mb_substr(trim($data['page_title']), 0, 200) ?: null
+                        : null,
+                    'referrer' => is_string($data['referrer'] ?? null)
+                        ? mb_substr(trim($data['referrer']), 0, 500) ?: null
+                        : null,
+                    'viewed_at' => now(),
+                ]);
+
+                // Score recompute is queued — keeps /init fast and lets
+                // the scoring engine evolve without affecting the
+                // visitor-facing path.
+                RecomputeLeadScoreJob::dispatch($conversation->id);
+            }
+        }
+
+        // Resolve a CMS-provided shopper identity, if any. Silent drop
+        // on bad signature so legacy installs and forged tokens both
+        // surface as anonymous visitors rather than auth failures.
+        $shopperClaims = null;
+        $shopperToken = $data['shopper_token'] ?? null;
+        if (is_string($shopperToken) && $shopperToken !== '') {
+            $shopperClaims = ShopperToken::verifyForWorkspace($shopperToken, $agent->workspace_id);
+        }
+
+        // Persist the shopper claims on the conversation so tools like
+        // LookupOrderTool can read them on later turns without having
+        // to re-decode the widget JWT inside the SSE stream.
+        if ($shopperClaims !== null) {
+            $attribution = (array) ($conversation->attribution ?? []);
+            $attribution['shopper'] = $shopperClaims;
+            $conversation->forceFill(['attribution' => $attribution])->save();
+        }
+
+        $issued = $this->jwt->issue($agent->id, $visitor->id, $conversation->id, $shopperClaims);
 
         // Recent turns so the widget can hydrate the chat log on page
         // reload. Last 30 messages, oldest-first — enough for context
@@ -195,104 +278,6 @@ class InitController
             ->where('conversation_id', $conversation->id)
             ->exists();
 
-        $agentData = [
-            'id' => $agent->id,
-            'name' => $agent->name,
-            'persona' => $agent->persona,
-            'theme' => $this->translateTheme($agent->theme),
-            'starter_prompts' => array_map(fn($p) => $this->localize($p, $lang), $this->resolveStarterPrompts($agent)),
-            'language_default' => $agent->language_default,
-            'site_type' => $agent->site_type,
-            'capabilities' => $this->resolveCapabilities($agent),
-            'restricted_paths' => array_values((array) ($agent->restricted_paths ?? [])),
-            'require_lead_before_chat' => (bool) $agent->require_lead_before_chat,
-            'lead_form_fields' => $agent->lead_form_fields,
-            'ui_labels' => [
-                'panel_title' => $this->localize('AI assistant', $lang),
-                'live_support_title' => $this->localize('Live support', $lang),
-                'close' => $this->localize('Close', $lang),
-                'clear_conversation' => $this->localize('Clear conversation', $lang),
-                'send' => $this->localize('Send', $lang),
-                'sending' => $this->localize('Sending...', $lang),
-                'dismiss' => $this->localize('Dismiss', $lang),
-                'powered_by' => $this->localize('Powered by', $lang),
-                'ask_anything' => $this->localize('Ask anything', $lang),
-                'lead_form_title' => $this->localize('Leave your details — we\'ll get back to you.', $lang),
-                'error_invalid_email' => $this->localize('Please enter a valid email address.', $lang),
-                'error_generic' => $this->localize('Could not save your details. Please try again.', $lang),
-                'field_name' => $this->localize('Your name', $lang),
-                'field_email' => $this->localize('Email', $lang),
-                'field_email_placeholder' => $this->localize('email@example.com', $lang),
-                'field_phone' => $this->localize('Phone number', $lang),
-                'field_optional' => $this->localize('Optional', $lang),
-                'field_date' => $this->localize('Date', $lang),
-                'field_time' => $this->localize('Time', $lang),
-                'typing' => $this->localize('AI is typing...', $lang),
-                'thinking' => $this->localize('Thinking...', $lang),
-                'start_voice' => $this->localize('Start voice input', $lang),
-                'stop_voice' => $this->localize('Stop voice input', $lang),
-                'voice_not_supported' => $this->localize('Voice input not supported in this browser', $lang),
-                'retry' => $this->localize('Retry', $lang),
-                'copy' => $this->localize('Copy', $lang),
-                'sources' => $this->localize('Sources', $lang),
-                'live_agent' => $this->localize('Live agent', $lang),
-                'connect_human' => $this->localize('Connect me with a human', $lang),
-                'read_more' => $this->localize('Read more', $lang),
-                'view' => $this->localize('View', $lang),
-                'copied_to_clipboard' => $this->localize('Code copied to clipboard!', $lang),
-                'appointment_request_cta' => $this->localize('Schedule appointment', $lang),
-                'appointment_request_title' => $this->localize('Schedule Appointment', $lang),
-                'appointment_request_desc' => $this->localize('Please select a suitable time from the form below.', $lang),
-                'appointment_success_desc' => $this->localize('We received your request and will get back to you shortly.', $lang),
-                'appointment_requested' => $this->localize('Appointment Requested', $lang),
-                'lead_success_title' => $this->localize('Thanks — we\'ll get back to you soon.', $lang),
-                'prechat_gate_subtitle' => $this->localize('Share your details so we can pick up where the chat leaves off.', $lang),
-                'start_chat' => $this->localize('Start chat', $lang),
-                'back' => $this->localize('Back', $lang),
-                'month_jan' => $this->localize('Jan', $lang),
-                'month_feb' => $this->localize('Feb', $lang),
-                'month_mar' => $this->localize('Mar', $lang),
-                'month_apr' => $this->localize('Apr', $lang),
-                'month_may' => $this->localize('May', $lang),
-                'month_jun' => $this->localize('Jun', $lang),
-                'month_jul' => $this->localize('Jul', $lang),
-                'month_aug' => $this->localize('Aug', $lang),
-                'month_sep' => $this->localize('Sep', $lang),
-                'month_oct' => $this->localize('Oct', $lang),
-                'month_nov' => $this->localize('Nov', $lang),
-                'month_dec' => $this->localize('Dec', $lang),
-                'day_sun_short' => $this->localize('Sun_S', $lang),
-                'day_mon_short' => $this->localize('Mon_M', $lang),
-                'day_tue_short' => $this->localize('Tue_T', $lang),
-                'day_wed_short' => $this->localize('Wed_W', $lang),
-                'day_thu_short' => $this->localize('Thu_T', $lang),
-                'day_fri_short' => $this->localize('Fri_F', $lang),
-                'day_sat_short' => $this->localize('Sat_S', $lang),
-                'select_time' => $this->localize('Select time', $lang),
-                'starting_chat' => $this->localize('Starting chat...', $lang),
-                'error_fill_in' => $this->localize('Please fill in ":field".', $lang),
-                'kvkk_text' => $this->localize('I consent to processing of my data.', $lang),
-                'error_kvkk' => $this->localize('Please accept the data processing terms.', $lang),
-                'case_study' => $this->localize('Case study', $lang),
-                'order' => $this->localize('Order', $lang),
-                'track_package' => $this->localize('Track Package', $lang),
-                'account_status' => $this->localize('Account Status', $lang),
-                'plan' => $this->localize('Plan', $lang),
-                'usage' => $this->localize('Usage', $lang),
-                'api_endpoint' => $this->localize('API Endpoint', $lang),
-                'versions' => $this->localize('Versions', $lang),
-                'troubleshooting' => $this->localize('Troubleshooting', $lang),
-                'select_an_option' => $this->localize('Select an option', $lang),
-                'insurance' => $this->localize('Insurance', $lang),
-                'treatment' => $this->localize('Treatment', $lang),
-                'treatment_info' => $this->localize('Treatment Info', $lang),
-                'estimated' => $this->localize('Estimated', $lang),
-                'ready_to_start' => $this->localize('Ready to get started?', $lang),
-                'create_account' => $this->localize('Create Free Account', $lang),
-                'plan_details' => $this->localize('Plan Details', $lang),
-            ],
-        ];
-
         return response()->json([
             'data' => [
                 'conversation_id' => $conversation->id,
@@ -300,9 +285,45 @@ class InitController
                 'anonymous_id' => $anonId,
                 'jwt' => $issued['token'],
                 'expires_at' => $issued['expires_at'],
-                'agent' => $agentData,
+                'agent' => [
+                    'id' => $agent->id,
+                    'name' => $agent->name,
+                    'persona' => $agent->persona,
+                    // Localize the launcher label + starter chips to the
+                    // widget locale. The widget renders both verbatim, so
+                    // resolving them here is what makes the SaaS preset's
+                    // "Ask about the product" / "What does it cost?" follow
+                    // the site language. Custom (non-preset) values with no
+                    // override pass through unchanged.
+                    'theme' => $this->localizeLauncherLabel($agent->theme, $widgetLocale),
+                    'starter_prompts' => $this->localizeStarterPrompts($agent->starter_prompts, $widgetLocale),
+                    'language_default' => $agent->language_default,
+                    'site_type' => $agent->site_type,
+                    'capabilities' => $this->resolveCapabilities($agent),
+                    // URL-path glob list — the widget bails on boot
+                    // when window.location.pathname matches any
+                    // pattern. Lets buyers disable the bot on their
+                    // own /admin or /checkout flow without code.
+                    'restricted_paths' => array_values((array) ($agent->restricted_paths ?? [])),
+                    // Per-agent toggle that gates the chat surface
+                    // behind a Name + Email form. The widget renders
+                    // a lead form first; only after capture does the
+                    // chat panel unlock.
+                    'require_lead_before_chat' => (bool) $agent->require_lead_before_chat,
+                    // Custom lead-form schema (#34). Widget renders
+                    // these fields in both the inline mid-chat form
+                    // and the pre-chat gate. NULL = fall back to the
+                    // default Name + Email shape.
+                    'lead_form_fields' => $agent->lead_form_fields,
+                    'locale' => $widgetLocale,
+                    'copy' => $this->widgetCopy->for($widgetLocale),
+                ],
                 'branding' => [
-                    'show' => ! ($workspace?->plan?->removesBranding() ?? false),
+                    // C6 wiring: route through Workspace::removesBranding()
+                    // so a Lifetime Deal unlock takes effect even when
+                    // the workspace's nominal subscription plan stays
+                    // on Free.
+                    'show' => ! ($workspace?->removesBranding() ?? false),
                     'label' => (string) config('branding.label'),
                     'url' => (string) config('branding.url'),
                     'logo_url' => $branding['footer_logo_url'] ?? $branding['header_logo_url'],
@@ -339,6 +360,7 @@ class InitController
             return [];
         }
 
+        $registry = app(VerticalPresetRegistry::class);
         $overrides = (array) ($agent->vertical_overrides ?? []);
         if (isset($overrides['capabilities']) && is_array($overrides['capabilities'])) {
             return array_values(array_unique(array_filter(
@@ -347,88 +369,50 @@ class InitController
             )));
         }
 
-        $registry = app(VerticalPresetRegistry::class);
         return $registry->for((string) $agent->site_type)->capabilities();
     }
 
-/**
- * Resolves the starter prompts for the widget. If the agent has custom
- * prompts defined in the DB, we use those. Otherwise, we pull the
- * defaults from the vertical preset (which are now translatable).
- */
-private function resolveStarterPrompts(Agent $agent): array
-{
-    // Re-verify the locale right before resolving prompts
-    $lang = $agent->language_default ?: 'en';
-    app()->setLocale($lang);
-    if (app()->bound('translator')) {
-        app('translator')->setLocale($lang);
-    }
-
-    $custom = (array) ($agent->starter_prompts ?? []);
-    if ($custom !== []) {
-        return array_values(array_filter($custom));
-    }
-    if ($agent->site_type === null) {
-        return [];
-    }
-
-    if (is_array($agent->starter_prompts) && count($agent->starter_prompts) > 0) {
-        return $agent->starter_prompts;
-    }
-
-    $registry = app(VerticalPresetRegistry::class);
-
-    return $registry->for((string) $agent->site_type)->starterPrompts();
-}
-
-/**
- * Translates known keys in the theme object (like launcher_label)
- * so that default English values from the DB are localized.
- */
-private function translateTheme(mixed $theme): array
-{
-    $theme = (array) ($theme ?? []);
-
-    if (isset($theme['launcher_label']) && is_string($theme['launcher_label'])) {
-        $label = $theme['launcher_label'] ?? '';
-        // If it's the default English label or the one the user disliked,
-        // Launcher label: If it's a default or empty, use the localized string
-        if ($label === 'Ask about the product' || $label === 'Ürün hakkında sorun' || $label === 'Ürün hakkında soru sor' || $label === 'Sorularınız mı var?' || $label === 'Ask anything' || $label === '') {
-            $theme['launcher_label'] = $this->localize('Ask about the product', app()->getLocale());
-        } else {
-            $theme['launcher_label'] = $this->localize($label, app()->getLocale());
+    /**
+     * Resolve each starter-prompt chip against the widget locale's
+     * overrides. Preset defaults (registered via {@see VerticalChrome})
+     * get translated; a custom prompt with no override falls back to its
+     * own text. Null in → null out (the widget renders no chips).
+     *
+     * @return array<int, string>|null
+     */
+    private function localizeStarterPrompts(mixed $prompts, string $locale): ?array
+    {
+        if (! is_array($prompts)) {
+            return null;
         }
+
+        return array_values(array_map(
+            fn ($prompt) => is_string($prompt)
+                ? ($this->translations->get($locale, $prompt) ?? $prompt)
+                : $prompt,
+            $prompts,
+        ));
     }
 
-    return $theme;
-}
+    /**
+     * Resolve the theme's `launcher_label` (the chat input placeholder)
+     * against the widget locale's overrides, leaving every other theme
+     * key untouched. Non-array themes and absent / blank labels pass
+     * through unchanged.
+     */
+    private function localizeLauncherLabel(mixed $theme, string $locale): mixed
+    {
+        if (! is_array($theme)) {
+            return $theme;
+        }
 
-/**
- * Translates labels and prompts, handling cases where they might be 
- * saved in Turkish in the DB but need to be shown in English.
- * Provides a robust fallback for English locales.
- */
-private function localize(string $key, string $lang): string
-{
-    if ($lang === 'en') {
-        $map = [
-            'Ücreti nedir?' => 'What does it cost?',
-            'Nasıl çalışır?' => 'How does it work?',
-            'Ücretsiz deneyebilir miyim?' => 'Can I try it for free?',
-            'Rakiplerden farkı nedir?' => 'How is this different from competitors?',
-            'Daha fazla bilgi alabilir miyim?' => 'Tell me more about this',
-            'Nasıl başlarım?' => 'How do I get started?',
-            'Demo görebilir miyim?' => 'Can I see a demo?',
-            'Ürün hakkında soru sor' => 'Ask about the product',
-            'Ürün hakkında sorun' => 'Ask about the product',
-            'Sorularınız mı var?' => 'Ask about the product',
-        ];
-        return $map[$key] ?? $key;
+        $label = $theme['launcher_label'] ?? null;
+        if (is_string($label) && $label !== '') {
+            $theme['launcher_label'] = $this->translations->get($locale, $label) ?? $label;
+        }
+
+        return $theme;
     }
-
-    return __($key, [], $lang);
-}
 
     /**
      * Strict, exact-match origin gate. The widget script is public; without

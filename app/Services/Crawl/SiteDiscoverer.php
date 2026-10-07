@@ -31,15 +31,6 @@ class SiteDiscoverer
         '/help',
         '/support',
         '/contact',
-        '/blog',
-        '/services',
-        '/solutions',
-        '/how-it-works',
-        '/testimonials',
-        '/case-studies',
-        '/portfolio',
-        '/demo',
-        '/guides',
     ];
 
     public function __construct(

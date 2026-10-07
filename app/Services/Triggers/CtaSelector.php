@@ -4,20 +4,40 @@ namespace App\Services\Triggers;
 
 use App\Models\Conversation;
 use App\Models\CtaRule;
+use App\Models\Workspace;
+use App\Support\CtaContextSigner;
 use Illuminate\Support\Facades\Cache;
 
 /**
- * Picks at most one CTA to surface alongside an assistant turn.
+ * Picks up to MAX_CTAS matching CTAs to surface alongside an assistant
+ * turn. Pre-fix this returned at most one — customer feedback (Dovydas)
+ * said "I added 3 CTAs but only one shows up" because we picked the
+ * first match and never surfaced the rest. Now we return every match in
+ * priority order so all configured CTAs that satisfy their conditions
+ * render together as a stacked card list.
  *
- * v1 strategy: lowest-cost rules first (URL match + lang). Higher-priority
- * rules win ties. Returns null if nothing matches.
+ * `select()` (singular) is kept for backwards compatibility — it
+ * returns the first match, same as before — so any caller / test that
+ * still expects a single CTA keeps working.
  */
 class CtaSelector
 {
+    public const MAX_CTAS = 3;
+
+    /**
+     * @return array{label: string, kind: string, url: ?string}|null
+     */
+    public function select(Conversation $conversation, string $assistantText): ?array
+    {
+        $all = $this->selectAll($conversation, $assistantText);
+
+        return $all[0] ?? null;
+    }
+
     /**
      * @return array<int, array{label: string, kind: string, url: ?string}>
      */
-    public function select(Conversation $conversation, string $assistantText): array
+    public function selectAll(Conversation $conversation, string $assistantText): array
     {
         $rules = $this->loadRules($conversation->agent_id);
         if ($rules === []) {
@@ -26,51 +46,55 @@ class CtaSelector
 
         $pageUrl = (string) ($conversation->page_url ?? '');
         $lang = (string) ($conversation->lang ?? '');
-        $found = [];
 
+        $picks = [];
         foreach ($rules as $rule) {
             if (! $this->matches($rule, $pageUrl, $lang, $assistantText)) {
                 continue;
             }
 
             $target = (array) ($rule['target'] ?? []);
+            $url = isset($target['url']) ? (string) $target['url'] : null;
 
-            $found[] = [
+            // D2: `forward_context` on the target opts the URL into the
+            // signed-payload flow. Operators pick the subset of fields
+            // to forward via `context_fields`; nothing leaks without
+            // explicit opt-in.
+            $forwardFields = (array) ($target['context_fields'] ?? []);
+            if (
+                $url !== null
+                && ! empty($target['forward_context'])
+                && $forwardFields !== []
+            ) {
+                $workspace = $this->workspaceFor($conversation);
+                if ($workspace !== null) {
+                    $url = app(CtaContextSigner::class)
+                        ->buildSignedUrl($url, $forwardFields, $conversation, $workspace);
+                }
+            }
+
+            $picks[] = [
                 'label' => (string) $rule['label'],
                 'kind' => (string) $rule['kind'],
-                'url' => isset($target['url']) ? (string) $target['url'] : null,
+                'url' => $url,
             ];
 
-            if (count($found) >= 3) {
+            if (count($picks) >= self::MAX_CTAS) {
                 break;
             }
         }
 
-        return $found;
+        return $picks;
     }
 
-    /**
-     * Heuristic: when the assistant's text suggests sharing an email or
-     * scheduling, return true to indicate the lead form should render.
-     */
-    public function shouldPromptForLead(string $assistantText): bool
+    private function workspaceFor(Conversation $conversation): ?Workspace
     {
-        $haystack = mb_strtolower($assistantText);
-        foreach ([
-            'share your email',
-            'leave your email',
-            "i'll have someone email you",
-            'capture your email',
-            'connect you with',
-            'book a',
-            'schedule a',
-        ] as $needle) {
-            if (str_contains($haystack, $needle)) {
-                return true;
-            }
+        $agent = $conversation->agent()->withoutGlobalScopes()->first();
+        if ($agent === null) {
+            return null;
         }
 
-        return false;
+        return Workspace::query()->withoutGlobalScopes()->find($agent->workspace_id);
     }
 
     /**

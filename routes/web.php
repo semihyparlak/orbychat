@@ -230,6 +230,17 @@ Route::middleware(['auth', 'verified'])->group(function () {
             Route::patch('app/cta-rules/{ctaRule}', [CtaRuleController::class, 'update'])->name('cta.update');
             Route::delete('app/cta-rules/{ctaRule}', [CtaRuleController::class, 'destroy'])->name('cta.destroy');
 
+            // MCP (Model Context Protocol) integration — per-agent
+            // tool grants + workspace-wide server connections.
+            Route::get('app/agents/{agent}/mcp', [\App\Http\Controllers\Admin\Mcp\McpServerController::class, 'index'])->name('agents.mcp.index');
+            Route::post('app/agents/{agent}/mcp', [\App\Http\Controllers\Admin\Mcp\McpServerController::class, 'store'])->name('agents.mcp.store');
+            Route::delete('app/agents/{agent}/mcp/{mcpServer}', [\App\Http\Controllers\Admin\Mcp\McpServerController::class, 'destroy'])->name('agents.mcp.destroy');
+            Route::post('app/agents/{agent}/mcp/{mcpServer}/test', [\App\Http\Controllers\Admin\Mcp\McpServerController::class, 'testConnection'])->name('agents.mcp.test');
+            Route::post('app/agents/{agent}/mcp/{mcpServer}/refresh', [\App\Http\Controllers\Admin\Mcp\McpServerController::class, 'refreshTools'])->name('agents.mcp.refresh');
+            Route::get('app/agents/{agent}/mcp/{mcpServer}/tools', [\App\Http\Controllers\Admin\Mcp\McpServerController::class, 'tools'])->name('agents.mcp.tools');
+            Route::patch('app/agents/{agent}/mcp/{mcpServer}/tools', [\App\Http\Controllers\Admin\Mcp\McpServerController::class, 'bulkUpdateGrants'])->name('agents.mcp.tools.bulk');
+            Route::get('app/agents/{agent}/mcp/{mcpServer}/activity', [\App\Http\Controllers\Admin\Mcp\McpActivityController::class, 'show'])->name('agents.mcp.activity');
+
             // Workspace-wide quick search — agents, conversations, leads
             Route::get('app/search', SearchController::class)->name('search');
 
@@ -384,3 +395,25 @@ Route::middleware(['auth', 'verified'])->group(function () {
 });
 
 require __DIR__.'/settings.php';
+
+// Serve public storage files directly if the webserver forwards to Laravel
+// (e.g. symlink missing in container or misconfigured static routing).
+Route::get('/storage/{path}', function (string $path) {
+    $fullPath = storage_path('app/public/'.$path);
+    if (! file_exists($fullPath)) {
+        if ((str_contains($path, 'header') || str_contains($path, 'logo')) && file_exists(public_path('logo.png'))) {
+            $fullPath = public_path('logo.png');
+        } elseif (str_contains($path, 'favicon') && file_exists(public_path('favicon.png'))) {
+            $fullPath = public_path('favicon.png');
+        } else {
+            abort(404);
+        }
+    }
+
+    $mime = @mime_content_type($fullPath) ?: 'image/png';
+
+    return response()->file($fullPath, [
+        'Content-Type' => $mime,
+        'Cache-Control' => 'public, max-age=86400',
+    ]);
+})->where('path', '.*');

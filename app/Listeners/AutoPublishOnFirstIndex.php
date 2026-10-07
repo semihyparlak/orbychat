@@ -5,6 +5,7 @@ namespace App\Listeners;
 use App\Actions\Agents\PublishAgent;
 use App\Models\Agent;
 use App\Models\Source;
+use Illuminate\Support\Facades\DB;
 
 /**
  * The first time any source for an agent finishes indexing, auto-publish
@@ -21,25 +22,53 @@ class AutoPublishOnFirstIndex
             return;
         }
 
-        $agent = Agent::query()->withoutGlobalScopes()->whereKey($source->agent_id)->first();
-        if ($agent === null) {
-            return;
-        }
-        if ($agent->is_published) {
-            return;
-        }
+        // Race condition guard. Two sources finishing indexing within
+        // the same tick (sitemap fan-out, parallel queue workers) both
+        // pass the `is_published=false` check and both pass the
+        // `hasPriorIndexedSource=false` check (each excludes itself,
+        // neither sees the sibling yet). Both then call publish →
+        // duplicate AgentVersion rows + "agent.published" audit fired
+        // twice. Wrap the read-modify-write in a transaction with a
+        // row-level lock on the agent; the second listener blocks
+        // until the first commits, then sees is_published=true and
+        // bails on line 79.
+        //
+        // CLAUDE.md §2 justification for `withoutGlobalScopes()`:
+        // queue listener runs without an authenticated request, so
+        // CurrentWorkspace resolves to null and the
+        // BelongsToAgent/BelongsToWorkspace scopes can't bind. The
+        // agent is identified by the source's own agent_id (which
+        // implies workspace via the source row); no cross-tenant
+        // read path.
+        DB::transaction(function () use ($source) {
+            $agent = Agent::query()
+                ->withoutGlobalScopes()
+                ->whereKey($source->agent_id)
+                ->lockForUpdate()
+                ->first();
 
-        // Only auto-publish on the first ever-indexed source for this agent.
-        $hasPriorIndexedSource = Source::query()->withoutWorkspaceScope()
-            ->where('agent_id', $agent->id)
-            ->where('id', '!=', $source->id)
-            ->where('status', 'indexed')
-            ->exists();
+            if ($agent === null || $agent->is_published) {
+                return;
+            }
 
-        if ($hasPriorIndexedSource) {
-            return;
-        }
+            // CLAUDE.md §2: explicit `agent_id =` clause carries the
+            // tenancy guarantee — Source.agent_id is workspace-scoped.
+            // Source has no SoftDeletes so any prior source row that
+            // exists is by definition still in the table; a deleted
+            // prior source is gone and the "is this the first index?"
+            // question is correctly answered by row existence alone.
+            $hasPriorIndexedSource = Source::query()
+                ->withoutWorkspaceScope()
+                ->where('agent_id', $agent->id)
+                ->where('id', '!=', $source->id)
+                ->where('status', 'indexed')
+                ->exists();
 
-        $this->publish->handle($agent);
+            if ($hasPriorIndexedSource) {
+                return;
+            }
+
+            $this->publish->handle($agent);
+        });
     }
 }
