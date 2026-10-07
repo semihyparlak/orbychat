@@ -1,0 +1,35 @@
+<?php
+
+namespace App\Services\Webhooks;
+
+use GuzzleHttp\Client as Guzzle;
+use Illuminate\Support\Facades\Log;
+
+class SignedDispatcher
+{
+    public function __construct(private readonly Guzzle $http = new Guzzle(['timeout' => 5])) {}
+
+    public function send(string $url, string $secret, array $payload): bool
+    {
+        $body = json_encode($payload, JSON_THROW_ON_ERROR);
+        $ts = (string) time();
+        $sig = hash_hmac('sha256', "{$ts}.{$body}", $secret);
+
+        try {
+            $response = $this->http->post($url, [
+                'headers' => [
+                    'Content-Type' => 'application/json',
+                    'X-OrbyChat-Signature' => "t={$ts},v1={$sig}",
+                ],
+                'body' => $body,
+                'http_errors' => false,
+            ]);
+
+            return $response->getStatusCode() < 400;
+        } catch (\Throwable $e) {
+            Log::warning('Webhook dispatch failed', ['url' => $url, 'error' => $e->getMessage()]);
+
+            return false;
+        }
+    }
+}

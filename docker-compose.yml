@@ -1,0 +1,60 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: orbychat-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: orbychat
+      POSTGRES_USER: orbychat
+      POSTGRES_PASSWORD: orbychat
+    ports:
+      - "${FORWARD_DB_PORT:-5432}:5432"
+    volumes:
+      - orbychat-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orbychat -d orbychat"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: orbychat-redis
+    restart: unless-stopped
+    ports:
+      - "${FORWARD_REDIS_PORT:-6379}:6379"
+    volumes:
+      - orbychat-redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: orbychat-qdrant
+    restart: unless-stopped
+    ports:
+      - "${FORWARD_QDRANT_PORT:-6333}:6333"
+      - "${FORWARD_QDRANT_GRPC_PORT:-6334}:6334"
+    volumes:
+      - orbychat-qdrantdata:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: orbychat-mailpit
+    restart: unless-stopped
+    ports:
+      - "${FORWARD_MAIL_PORT:-1025}:1025"
+      - "${FORWARD_MAILPIT_DASHBOARD_PORT:-8025}:8025"
+
+volumes:
+  orbychat-pgdata:
+  orbychat-redisdata:
+  orbychat-qdrantdata:
