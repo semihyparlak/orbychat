@@ -28,7 +28,6 @@ return Application::configure(basePath: dirname(__DIR__))
             SetLocale::class,
             HandleInertiaRequests::class,
             ResolveCurrentWorkspace::class,
-            AddLinkHeadersForPreloadedAssets::class,
             \App\Http\Middleware\PreventInertiaCaching::class,
         ]);
 
