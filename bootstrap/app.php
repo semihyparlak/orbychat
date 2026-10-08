@@ -48,12 +48,47 @@ return Application::configure(basePath: dirname(__DIR__))
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         $exceptions->render(function (\Symfony\Component\HttpKernel\Exception\NotFoundHttpException $e, \Illuminate\Http\Request $request) {
+            if ($request->expectsJson() || $request->is('api/*')) {
+                return response()->json(['message' => 'Not Found'], 404);
+            }
+
             if (! $request->isMethod('GET')) {
-                return null;
+                return response('Not Found', 404);
             }
 
             try {
-                return \Inertia\Inertia::render('errors/404')
+                // Ensure locale is resolved
+                $locale = 'en';
+                $cookieLocale = $request->cookie('locale');
+
+                if ($request->hasSession() && $request->session()->has('locale')) {
+                    $locale = $request->session()->get('locale');
+                } elseif ($cookieLocale && in_array($cookieLocale, ['en', 'tr'], true)) {
+                    $locale = $cookieLocale;
+                } else {
+                    $cfCountry = $request->header('cf-ipcountry');
+                    if ($cfCountry && strtoupper($cfCountry) === 'TR') {
+                        $locale = 'tr';
+                    } else {
+                        $acceptLang = strtolower((string) $request->header('accept-language', ''));
+                        $browserLocale = $request->getPreferredLanguage(['en', 'tr']);
+                        if ($browserLocale === 'tr' || str_starts_with($acceptLang, 'tr') || str_contains($acceptLang, 'tr-tr')) {
+                            $locale = 'tr';
+                        }
+                    }
+                }
+                app()->setLocale($locale);
+
+                $transFile = lang_path("{$locale}.json");
+                $translations = file_exists($transFile)
+                    ? (json_decode(file_get_contents($transFile), true) ?? [])
+                    : [];
+
+                return \Inertia\Inertia::render('errors/404', [
+                    'locale' => $locale,
+                    'translations' => $translations,
+                    'branding' => \App\Support\AppBranding::shared(),
+                ])
                     ->toResponse($request)
                     ->setStatusCode(404);
             } catch (\Throwable) {

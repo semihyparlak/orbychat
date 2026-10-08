@@ -80,7 +80,7 @@ Route::get('/locale/{locale}', function (string $locale) {
     session()->put('locale', $locale);
     session()->save();
 
-    return back();
+    return back()->withCookie(cookie()->forever('locale', $locale));
 })->name('locale.change');
 
 // Always public regardless of the marketing toggle — /privacy and
@@ -417,3 +417,14 @@ Route::get('/storage/{path}', function (string $path) {
         'Cache-Control' => 'public, max-age=86400',
     ]);
 })->where('path', '.*');
+
+Route::fallback(function (\Illuminate\Http\Request $request) {
+    if ($request->expectsJson() || $request->is('api/*')) {
+        return response()->json(['message' => 'Not Found'], 404);
+    }
+
+    return \Inertia\Inertia::render('errors/404')
+        ->toResponse($request)
+        ->setStatusCode(404);
+});
+

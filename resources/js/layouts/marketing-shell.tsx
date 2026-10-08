@@ -139,35 +139,6 @@ export function MarketingShell({
                             {__(item.label)}
                         </Link>
                     ))}
-                    {content.header.resources_label ? (
-                        // Open in a new tab on purpose:
-                        //   1. The docs site is a separate Blade-rendered
-                        //      experience (Mintlify-style sidebar + chrome),
-                        //      so an Inertia <Link> would trigger the modal-
-                        //      overlay fallback we hit before.
-                        //   2. Visitors who pop the docs to skim shouldn't
-                        //      lose their place on the marketing flow.
-                        <a
-                            href={content.header.resources_href}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="inline-flex items-center gap-1 transition hover:text-[#173f2c]"
-                        >
-                            {__(content.header.resources_label)}
-                            <svg
-                                viewBox="0 0 24 24"
-                                fill="none"
-                                stroke="currentColor"
-                                strokeWidth="2"
-                                strokeLinecap="round"
-                                strokeLinejoin="round"
-                                className="size-3 opacity-70"
-                                aria-hidden="true"
-                            >
-                                <path d="M7 17L17 7M9 7h8v8" />
-                            </svg>
-                        </a>
-                    ) : null}
                 </nav>
 
                 <div className="flex items-center gap-3 lg:gap-4">

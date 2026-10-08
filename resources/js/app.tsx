@@ -32,6 +32,10 @@ function currentSiteTitle(): string {
  */
 let globalTranslations: Record<string, string> = {};
 
+export function setTranslations(translations: Record<string, string>): void {
+    globalTranslations = translations;
+}
+
 export function __(key: string, replacements: Record<string, string | number> = {}): string {
     let translation = globalTranslations[key] !== undefined ? globalTranslations[key] : key;
 
@@ -44,6 +48,7 @@ export function __(key: string, replacements: Record<string, string | number> = 
 
 // Make it available globally
 (window as any).__ = __;
+(window as any).__setTranslations = setTranslations;
 
 function upsertHeadLink(id: string, rel: string, href: string): void {
     let link = document.getElementById(id) as HTMLLinkElement | null;

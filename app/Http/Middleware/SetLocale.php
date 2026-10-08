@@ -16,36 +16,27 @@ class SetLocale
      */
     public function handle(Request $request, Closure $next): Response
     {
+        $cookieLocale = $request->cookie('locale');
+
         if ($request->session()->has('locale')) {
             App::setLocale($request->session()->get('locale'));
+        } elseif ($cookieLocale && in_array($cookieLocale, ['en', 'tr'], true)) {
+            App::setLocale($cookieLocale);
+            $request->session()->put('locale', $cookieLocale);
         } else {
             // Default to English
             $locale = 'en';
 
             // 1. Check Cloudflare header first (fastest & most reliable)
             $cfCountry = $request->header('cf-ipcountry');
-            if ($cfCountry) {
-                if (strtoupper($cfCountry) === 'TR') {
-                    $locale = 'tr';
-                }
+            if ($cfCountry && strtoupper($cfCountry) === 'TR') {
+                $locale = 'tr';
             } else {
-                // 2. Fallback to Browser detection if not on Cloudflare
+                // 2. Check browser Accept-Language header
+                $acceptLang = strtolower((string) $request->header('accept-language', ''));
                 $browserLocale = $request->getPreferredLanguage(['en', 'tr']);
-                if ($browserLocale === 'tr') {
+                if ($browserLocale === 'tr' || str_starts_with($acceptLang, 'tr') || str_contains($acceptLang, 'tr-tr')) {
                     $locale = 'tr';
-                }
-
-                // 3. Last resort: External IP API (only if needed)
-                try {
-                    $response = \Illuminate\Support\Facades\Http::timeout(1)->get('http://ip-api.com/json/' . $request->ip());
-                    if ($response->successful()) {
-                        $data = $response->json();
-                        if (isset($data['countryCode']) && strtoupper($data['countryCode']) === 'TR') {
-                            $locale = 'tr';
-                        }
-                    }
-                } catch (\Exception $e) {
-                    // Stay with current $locale
                 }
             }
 

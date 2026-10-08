@@ -120,7 +120,7 @@ class MarketingHomeContent
                 ['label' => 'Integrations', 'href' => '/integrations'],
             ],
             'header' => [
-                'resources_label' => 'Documentation',
+                'resources_label' => '',
                 'resources_href' => '/documentation',
                 // Point the marketing site's doc links at an external docs
                 // domain (e.g. https://yourdocs.com). Blank = use the

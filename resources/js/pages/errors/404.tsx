@@ -1,12 +1,47 @@
-import { Link, Head } from '@inertiajs/react';
+import { Link, Head, usePage } from '@inertiajs/react';
 import { ArrowLeft, Home } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { __ } from '@/app';
+import { LanguageSwitcher } from '@/components/language-switcher';
+import { __, setTranslations } from '@/app';
 
 export default function NotFound() {
+    const { branding, translations } = usePage<{
+        branding?: { site_title?: string };
+        translations?: Record<string, string>;
+    }>().props;
+    const siteTitle = branding?.site_title || 'OrbyChat';
+
+    if (translations && Object.keys(translations).length > 0) {
+        setTranslations(translations);
+    }
+
+    const handleGoBack = () => {
+        if (typeof window === 'undefined') return;
+
+        // If the user arrived here from within our site in the same tab, navigate back
+        if (window.history.length > 1 && document.referrer && document.referrer.includes(window.location.host)) {
+            window.history.back();
+            // Fallback timeout in case history.back() was a no-op in the current session
+            setTimeout(() => {
+                if (window.location.pathname !== '/') {
+                    window.location.href = '/';
+                }
+            }, 300);
+            return;
+        }
+
+        // If opened in a new tab or direct external URL with no previous in-site history:
+        window.location.href = '/';
+    };
+
     return (
-        <div className="flex min-h-screen flex-col items-center justify-center bg-[#f7f2e8] p-6 text-[#252a24]">
+        <div className="relative flex min-h-screen flex-col items-center justify-center bg-[#f7f2e8] p-6 text-[#252a24]">
             <Head title={__('Page Not Found | OrbyChat')} />
+
+            {/* Language switcher in the top right corner */}
+            <div className="absolute top-6 right-6 z-20">
+                <LanguageSwitcher />
+            </div>
             
             <div className="relative mb-12 w-full max-w-lg text-center">
                 <div className="relative mx-auto mb-10 h-80 w-80">
@@ -47,7 +82,7 @@ export default function NotFound() {
                     <Button 
                         variant="ghost" 
                         size="lg"
-                        onClick={() => window.history.back()}
+                        onClick={handleGoBack}
                         className="h-14 rounded-2xl border-none px-8 text-base font-bold text-[#173f2c] transition-all hover:bg-[#173f2c]/5 active:scale-95"
                     >
                         <ArrowLeft className="mr-2 size-5" />
@@ -59,7 +94,7 @@ export default function NotFound() {
             <div className="flex items-center gap-2 opacity-30">
                 <div className="h-px w-8 bg-[#173f2c]"></div>
                 <p className="text-[10px] font-black uppercase tracking-[0.3em] text-[#173f2c]">
-                    OrbyChat
+                    {siteTitle}
                 </p>
                 <div className="h-px w-8 bg-[#173f2c]"></div>
             </div>
