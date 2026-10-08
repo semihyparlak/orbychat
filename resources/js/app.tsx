@@ -33,7 +33,7 @@ function currentSiteTitle(): string {
 let globalTranslations: Record<string, string> = {};
 
 export function __(key: string, replacements: Record<string, string | number> = {}): string {
-    let translation = globalTranslations[key] || key;
+    let translation = globalTranslations[key] !== undefined ? globalTranslations[key] : key;
 
     Object.keys(replacements).forEach((r) => {
         translation = translation.replace(new RegExp(`:${r}`, 'g'), String(replacements[r]));

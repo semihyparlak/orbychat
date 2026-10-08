@@ -944,22 +944,24 @@ export default function MarketingHome({
                                     <span className="block">
                                         <span className="text-[#1d5139] italic">
                                             {__(content.hero.accent)}
-                                        </span>{' '}
-                                        <span>
-                                            {__(content.hero.line_two_suffix)}
                                         </span>
+                                        {__(content.hero.line_two_suffix) ? (
+                                            <span> {__(content.hero.line_two_suffix)}</span>
+                                        ) : null}
                                     </span>
                                     <span className="block">
-                                        {__(content.hero.line_three_prefix)}{' '}
+                                        {__(content.hero.line_three_prefix) ? (
+                                            <span>{__(content.hero.line_three_prefix)} </span>
+                                        ) : null}
                                         <span className="relative isolate inline-block w-fit text-[#173f2c]">
                                             <span
                                                 aria-hidden="true"
                                                 className="absolute inset-x-[-0.03em] bottom-[0.12em] -z-10 h-[0.2em] rounded-full bg-[#dce7ce]"
                                             />
-                                                {
-                                                    __(content.hero
-                                                        .line_three_highlight)
-                                                }
+                                            {
+                                                __(content.hero
+                                                    .line_three_highlight)
+                                            }
                                         </span>
                                     </span>
                                     <span className="block">
