@@ -272,6 +272,33 @@ class MarketingHomeContent
                     ],
                 ],
             ],
+            'rich_features' => [
+                'badge' => 'Next-gen capabilities',
+                'title' => 'Go beyond basic chat with rich interactions.',
+                'items' => [
+                    [
+                        'id' => 'appointments',
+                        'icon' => 'Clock3',
+                        'title' => 'Appointment Scheduling',
+                        'description' => 'Directly book meetings and demos within the chat thread. AI handles the availability check and confirms the slot.',
+                        'feature_label' => 'Book a slot',
+                    ],
+                    [
+                        'id' => 'ecommerce',
+                        'icon' => 'ShoppingCart',
+                        'title' => 'E-commerce Integration',
+                        'description' => 'Connect your Shopify or Ikas store. The AI can recommend products, check inventory, and guide visitors to checkout.',
+                        'feature_label' => 'Sell products',
+                    ],
+                    [
+                        'id' => 'leads',
+                        'icon' => 'ClipboardList',
+                        'title' => 'Smart Lead Capture',
+                        'description' => 'Dynamic forms that appear exactly when the AI detects high intent. Fully customizable fields and instant routing.',
+                        'feature_label' => 'High-intent forms',
+                    ],
+                ],
+            ],
             'control' => [
                 'badge' => 'You are in control',
                 'title' => 'Tune the AI to match your messaging and goals.',

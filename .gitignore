@@ -39,3 +39,4 @@ yarn-error.log
 !resources/**/*.png
 !public/**/*.png
 !docs/**/*.png
+!storage/app/public/**/*.png

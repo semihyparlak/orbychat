@@ -92,6 +92,14 @@ class AppBranding
             return null;
         }
 
+        try {
+            if (! Storage::disk(self::disk())->exists($path)) {
+                return asset('logo.png');
+            }
+        } catch (\Throwable) {
+            // Hot path fallback
+        }
+
         return Storage::disk(self::disk())->url($path);
     }
 

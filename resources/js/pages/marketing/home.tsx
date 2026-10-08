@@ -129,7 +129,7 @@ type LandingContent = {
         title: string;
         cards: IconContentCard[];
     };
-    rich_features: {
+    rich_features?: {
         badge: string;
         title: string;
         items: Array<{
@@ -852,8 +852,12 @@ function FaqAccordion({ content }: { content: LandingContent['faq'] }) {
 function RichFeatures({
     content,
 }: {
-    content: LandingContent['rich_features'];
+    content?: LandingContent['rich_features'];
 }) {
+    if (!content || !content.items || !content.badge) {
+        return null;
+    }
+
     return (
         <section className="bg-white py-24">
             <div className="mx-auto max-w-[1200px] px-6 lg:px-10">
@@ -1083,7 +1087,9 @@ export default function MarketingHome({
                         </Card>
                     </section>
 
-                    <RichFeatures content={content.rich_features} />
+                    {content.rich_features && (
+                        <RichFeatures content={content.rich_features} />
+                    )}
                     <section className="mx-auto grid max-w-[1200px] gap-12 px-6 py-24 lg:grid-cols-[0.8fr_1.4fr] lg:items-center lg:px-10">
                         <div className="flex flex-col gap-6">
                             <SectionLabel>

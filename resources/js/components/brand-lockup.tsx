@@ -41,6 +41,12 @@ export default function BrandLockup({
                     <img
                         src={logoUrl}
                         alt={alt ?? (showText ? `${siteTitle} logo` : siteTitle)}
+                        onError={(e) => {
+                            const target = e.currentTarget;
+                            if (!target.src.endsWith('/logo.png')) {
+                                target.src = '/logo.png';
+                            }
+                        }}
                         className={cn(
                             'h-10 w-auto max-w-[220px] object-contain',
                             logoClassName,
