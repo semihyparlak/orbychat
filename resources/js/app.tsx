@@ -18,6 +18,7 @@ function currentSiteTitle(): string {
     }
 
     return (
+        window.__ORBYCHAT_SITE_TITLE__ ??
         window.__PITCHBAR_SITE_TITLE__ ??
         document
             .querySelector('meta[name="application-name"]')
@@ -65,6 +66,7 @@ function syncBranding(branding?: Branding): void {
     const previousTitle = currentSiteTitle();
     const nextSiteTitle = branding?.site_title?.trim() || previousTitle;
 
+    window.__ORBYCHAT_SITE_TITLE__ = nextSiteTitle;
     window.__PITCHBAR_SITE_TITLE__ = nextSiteTitle;
 
     const meta = document.querySelector('meta[name="application-name"]');
@@ -81,13 +83,16 @@ function syncBranding(branding?: Branding): void {
 
     const faviconUrl =
         branding?.favicon_url ??
+        window.__ORBYCHAT_DEFAULT_FAVICON_URL__ ??
         window.__PITCHBAR_DEFAULT_FAVICON_URL__ ??
         '/favicon.ico';
     const touchIconUrl =
         branding?.favicon_url ??
+        window.__ORBYCHAT_DEFAULT_TOUCH_ICON_URL__ ??
         window.__PITCHBAR_DEFAULT_TOUCH_ICON_URL__ ??
         '/apple-touch-icon.png';
 
+    window.__ORBYCHAT_FAVICON_URL__ = faviconUrl;
     window.__PITCHBAR_FAVICON_URL__ = faviconUrl;
     upsertHeadLink('app-favicon', 'icon', faviconUrl);
     upsertHeadLink('app-apple-touch-icon', 'apple-touch-icon', touchIconUrl);

@@ -3,6 +3,10 @@ import type { Branding } from '@/types/branding';
 
 declare global {
     interface Window {
+        __ORBYCHAT_SITE_TITLE__?: string;
+        __ORBYCHAT_FAVICON_URL__?: string;
+        __ORBYCHAT_DEFAULT_FAVICON_URL__?: string;
+        __ORBYCHAT_DEFAULT_TOUCH_ICON_URL__?: string;
         __PITCHBAR_SITE_TITLE__?: string;
         __PITCHBAR_FAVICON_URL__?: string;
         __PITCHBAR_DEFAULT_FAVICON_URL__?: string;

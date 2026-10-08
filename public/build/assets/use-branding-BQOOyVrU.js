@@ -1,1 +1,0 @@
-import{c as e}from"./dist-oTYVtS-L.js";function t(){return e().props.branding}export{t};

@@ -37,9 +37,22 @@ export default function BrandLockup({
             )}
         >
             {showLogo ? (
-                <span className="flex items-center justify-center text-current">
-                    <AppLogoIcon />
-                </span>
+                logoUrl ? (
+                    <img
+                        src={logoUrl}
+                        alt={alt ?? (showText ? `${siteTitle} logo` : siteTitle)}
+                        className={cn(
+                            'h-10 w-auto max-w-[220px] object-contain',
+                            logoClassName,
+                        )}
+                    />
+                ) : (
+                    fallbackLogo ?? (
+                        <span className="flex items-center justify-center text-current">
+                            <AppLogoIcon className={logoClassName} />
+                        </span>
+                    )
+                )
             ) : null}
 
             {showText
